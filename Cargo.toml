@@ -1,5 +1,5 @@
 [package]
-name = "quiche"
+name = "mini-quiche"
 version = "0.1.0"
 edition = "2021"
 
