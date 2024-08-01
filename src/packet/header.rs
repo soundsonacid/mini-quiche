@@ -1,5 +1,5 @@
 use crate::{
-    bits::BitsExt,
+    bits::{compose_bits, decompose_bits, BitsExt},
     result::{require, QuicheResult},
 };
 
@@ -17,6 +17,9 @@ use super::types::*;
 // if subsequent Initial packets include a different Source Connection ID, they MUST be discarded.
 // This avoids unpredictable outcomes that might otherwise result from stateless processing of multiple Initial packets with different Source Connection IDs.
 
+// i would like to avoid dynamic dispatch
+// that is why this is an enum and `Header` is not a trait implemented for `LongHeader` and `ShortHeader` with `encode` and `decode` methods
+// i also think the distinction between initial, retry, and long headers is important, and that wouldn't be as obvious with a trait
 #[derive(PartialEq, Debug)]
 pub enum Header {
     Initial(LongHeader),
@@ -27,11 +30,9 @@ pub enum Header {
 
 impl Header {
     pub fn decode(bytes: &mut Vec<u8>) -> Header {
-        match bytes[0] & 1 == HeaderForm::long().to_inner() {
-            true => LongHeader::decode(bytes).unwrap(),
-            false => {
-                unimplemented!()
-            }
+        match bytes[0] & 1 == HeaderForm::short().to_inner() {
+            true => ShortHeader::decode(bytes).unwrap(),
+            false => LongHeader::decode(bytes).unwrap(),
         }
     }
 
@@ -40,21 +41,11 @@ impl Header {
             Header::Initial(header) | Header::Retry(header) | Header::Long(header) => {
                 header.encode()
             }
-            Header::Short(_header) => {
-                unimplemented!()
-            }
+            Header::Short(header) => header.encode(),
         }
     }
 }
 
-// First byte:
-// 0 bit offset - long header
-// 1 bit offset - fixed bit
-// 2-3 bit offset - long packet type
-// 4-7 bit offset - type specific bits
-// 0-3 bit offset - version id
-// 4 bit offset - dst cid len
-// 4 bi
 #[derive(PartialEq, Debug)]
 pub struct LongHeader {
     header_form: HeaderForm,
@@ -79,18 +70,11 @@ pub struct LongHeader {
 impl LongHeader {
     pub fn len(&self) -> QuicheResult<usize> {
         let len = 1 + 4 + 1 + self.dst_cid.cid_len + 1 + self.src_cid.cid_len;
-        // TODO: this is horrible why is this here
+        // TODO: this is horrible why is this check here
         require(len <= 47, "LongHeader length must not exceed 47 bytes")?;
-        // 1 byte for header_form (1 bit) + fixed_bit (1 bit) + long_packet_type (2 bits) + type_specific_bits (4 bits)
-        // 4 bytes for version_id (u32 = 32 bits)
-        // 1 byte for dst_cid.cid_len (u8 = 8 bits)
-        // dst_cid.cid_len bytes for dst_cid.cid
-        // 1 byte for src_cid.cid_len (u8 = 8 bits)
-        // src_cid.cid_len bytes for src_cid.cid
         Ok(len.into())
     }
 
-    // type_specific_bits for Initial headers:
     // least significant 2 bits - reserved bits
     // most significant 2 bits - packet number length
     pub fn initial(
@@ -125,29 +109,18 @@ impl LongHeader {
 
     pub fn decode(bytes: &mut Vec<u8>) -> QuicheResult<Header> {
         // the first byte of the long header is the header form + fixed bit + long packet type + type specific bits
-        let mut first_byte = bytes.remove(0);
+        let first_byte = bytes.remove(0);
 
-        let header_form_bit = first_byte & 1;
-        let header_form = HeaderForm::from_num(header_form_bit);
-        first_byte = first_byte >> 1;
+        let bitvec = decompose_bits(first_byte, &[1, 1, 2, 4]);
 
-        let fixed_bit_bit = first_byte & 1;
-        let fixed_bit = SingleBit::from_num(fixed_bit_bit);
-        first_byte = first_byte >> 1;
+        let header_form_bits = bitvec.get(0).expect("header form bits");
+        let header_form = HeaderForm::from_bits(header_form_bits.clone());
 
-        let mut long_packet_two_bits = 0;
+        let fixed_bit_bits = bitvec.get(1).expect("fixed bit bits");
+        let fixed_bit = SingleBit::from_bits(fixed_bit_bits.clone());
 
-        let long_packet_type_low_bit = first_byte & 1;
-        first_byte = first_byte >> 1;
-
-        let long_packet_type_high_bit = first_byte & 1;
-        first_byte = first_byte >> 1;
-
-        long_packet_two_bits |= long_packet_type_high_bit;
-        long_packet_two_bits = long_packet_two_bits << 1;
-        long_packet_two_bits |= long_packet_type_low_bit;
-
-        let long_packet_type = LongPacketType::from_num(long_packet_two_bits);
+        let long_packet_bits = bitvec.get(2).expect("long packet bits");
+        let long_packet_type = LongPacketType::from_bits(long_packet_bits.clone());
 
         // TODO: this feels hacky and wrong
         let header_enum = match long_packet_type.to_inner() {
@@ -156,28 +129,9 @@ impl LongHeader {
             _ => Header::Long,
         };
 
-        let mut type_specific_four_bits = 0;
+        let type_specific_four_bits = bitvec.get(3).expect("type specific bits");
 
-        let type_specific_bits_bit_one = first_byte & 1;
-        first_byte = first_byte >> 1;
-
-        let type_specific_bits_bit_two = first_byte & 1;
-        first_byte = first_byte >> 1;
-
-        let type_specific_bits_bit_three = first_byte & 1;
-        first_byte = first_byte >> 1;
-
-        let type_specific_bits_bit_four = first_byte & 1;
-
-        type_specific_four_bits |= type_specific_bits_bit_four;
-        type_specific_four_bits = type_specific_four_bits << 1;
-        type_specific_four_bits |= type_specific_bits_bit_three;
-        type_specific_four_bits = type_specific_four_bits << 1;
-        type_specific_four_bits |= type_specific_bits_bit_two;
-        type_specific_four_bits = type_specific_four_bits << 1;
-        type_specific_four_bits |= type_specific_bits_bit_one;
-
-        let type_specific_bits = FourBits::from_num(type_specific_four_bits);
+        let type_specific_bits = FourBits::from_bits(type_specific_four_bits.clone());
 
         let version_id_bytes = bytes.drain(0..4).collect::<Vec<u8>>();
         let version_id = u32::from_le_bytes(version_id_bytes.try_into().expect("version_id bytes"));
@@ -211,32 +165,16 @@ impl LongHeader {
     // returns a Vec<u8> which MUST NOT exceed 47 bytes
     pub fn encode(&self) -> QuicheResult<Vec<u8>> {
         let mut bytes = Vec::with_capacity(self.len()?);
-        let mut first_byte = 0;
 
-        first_byte |= self.header_form.bits()[0] as u8;
+        let bitvec = [
+            self.header_form.bits(),        // 1
+            self.fixed_bit.bits(),          // 1
+            self.long_packet_type.bits(),   // 2
+            self.type_specific_bits.bits(), // 4
+        ]
+        .concat();
 
-        first_byte = first_byte << 1;
-        first_byte |= self.fixed_bit.bits()[0] as u8;
-
-        first_byte = first_byte << 1;
-        first_byte |= self.long_packet_type.bits()[0] as u8;
-
-        first_byte = first_byte << 1;
-        first_byte |= self.long_packet_type.bits()[1] as u8;
-
-        first_byte = first_byte << 1;
-        first_byte |= self.type_specific_bits.bits()[0] as u8;
-
-        first_byte = first_byte << 1;
-        first_byte |= self.type_specific_bits.bits()[1] as u8;
-
-        first_byte = first_byte << 1;
-        first_byte |= self.type_specific_bits.bits()[2] as u8;
-
-        first_byte = first_byte << 1;
-        first_byte |= self.type_specific_bits.bits()[3] as u8;
-
-        first_byte = u8::reverse_bits(first_byte);
+        let first_byte = compose_bits(&bitvec);
         bytes.push(first_byte);
 
         bytes.extend(self.version_id.to_le_bytes());
@@ -251,8 +189,132 @@ impl LongHeader {
     }
 }
 
+// packet protection
+
 #[derive(PartialEq, Debug)]
-pub struct ShortHeader {}
+pub struct ShortHeader {
+    header_form: HeaderForm,
+    // packets containing a zero value for this bit are NOT valid in quic version 1
+    fixed_bit: SingleBit,
+    // this bit enables passive latency monitoring throughout the duration of a connection
+    // the server stores the value received, while the client "spins" it after one RTT.
+    // observers can measure the time between two spin bit flips to determine the RTT of the connection
+    // this bit is only present in 1-RTT packets.  in other packets it will be a randomly generated value.
+    spin_bit: SingleBit,
+    // protected using header protection
+    reserved_bits: TwoBits,
+    // this allows the recipient of a packet to identify the packet protection keys
+    // which are used to protect the packet
+    // this bit is protected using header protection
+    key_phase: SingleBit,
+    // length of the packet number field, one less than the length of the packet number field in bytes
+    // protected using header protection
+    number_len: TwoBits,
+    // a connection id that is chosen by the intended recipient of the packet.
+    dst_cid: ConnectionId,
+    // 1-4 bytes long.
+    // protected using header protection
+    number: Vec<u8>,
+}
+
+impl ShortHeader {
+    pub fn len(&self) -> QuicheResult<usize> {
+        let len = 1 + 1 + 1 + 2 + 1 + 2 + 1 + self.dst_cid.cid_len + 4;
+        require(len <= 33, "ShortHeader length must not exceed 33 bytes")?;
+        Ok(len.into())
+    }
+
+    pub fn one_rtt(
+        spin_bit: SingleBit,
+        reserved_bits: TwoBits,
+        key_phase: SingleBit,
+        number_len: TwoBits,
+        dst_cid: ConnectionId,
+        number: Vec<u8>,
+    ) -> Self {
+        Self {
+            header_form: HeaderForm::short(),
+            fixed_bit: SingleBit::one(),
+            spin_bit,
+            reserved_bits,
+            key_phase,
+            number_len,
+            dst_cid,
+            number,
+        }
+    }
+
+    pub fn decode(bytes: &mut Vec<u8>) -> QuicheResult<Header> {
+        // the first byte of the short header is the header form + fixed bit + spin bit + reserved bits + key phase + number length
+        let first_byte = bytes.remove(0);
+
+        let bitvec = decompose_bits(first_byte, &[1, 1, 1, 2, 1, 2]);
+
+        let header_form_bits = bitvec.get(0).expect("header form bits");
+        let header_form = HeaderForm::from_bits(header_form_bits.clone());
+
+        let fixed_bit_bits = bitvec.get(1).expect("fixed bit bits");
+        let fixed_bit = SingleBit::from_bits(fixed_bit_bits.clone());
+
+        let spin_bit_bits = bitvec.get(2).expect("spin bit bits");
+        let spin_bit = SingleBit::from_bits(spin_bit_bits.clone());
+
+        let reserved_bits_bits = bitvec.get(3).expect("reserved bits bits");
+        let reserved_bits = TwoBits::from_bits(reserved_bits_bits.clone());
+
+        let key_phase_bits = bitvec.get(4).expect("key phase bits");
+        let key_phase = SingleBit::from_bits(key_phase_bits.clone());
+
+        let number_len_bits = bitvec.get(5).expect("number length bits");
+        let number_len = TwoBits::from_bits(number_len_bits.clone());
+
+        let dst_cid_len = bytes.remove(0);
+        let dst_cid_data = bytes.drain(0..dst_cid_len as usize).collect::<Vec<u8>>();
+
+        let number = bytes.drain(0..4).collect::<Vec<u8>>();
+
+        require(
+            bytes.is_empty(),
+            "LongHeader::decode: Failed to read all bytes",
+        )?;
+
+        Ok(Header::Short(Self {
+            header_form,
+            fixed_bit,
+            spin_bit,
+            reserved_bits,
+            key_phase,
+            number_len,
+            dst_cid: ConnectionId::new(dst_cid_len, dst_cid_data),
+            number,
+        }))
+    }
+
+    // returns a Vec<u8> which MUST NOT exceed 33 bytes
+    pub fn encode(&self) -> QuicheResult<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(self.len()?);
+
+        let bitvec = [
+            self.header_form.bits(),   // 1
+            self.fixed_bit.bits(),     // 1
+            self.spin_bit.bits(),      // 1
+            self.reserved_bits.bits(), // 2
+            self.key_phase.bits(),     // 1
+            self.number_len.bits(),    // 2
+        ]
+        .concat();
+
+        let first_byte = compose_bits(&bitvec);
+        bytes.push(first_byte);
+
+        bytes.push(self.dst_cid.cid_len);
+        bytes.extend(self.dst_cid.cid.iter());
+
+        bytes.extend(self.number.iter());
+
+        Ok(bytes)
+    }
+}
 
 #[cfg(test)]
 mod test_header {
@@ -272,7 +334,7 @@ mod test_header {
         let header_enum_gen = vec![Header::Initial, Header::Retry, Header::Long];
         let header_enum = header_enum_gen[header_type as usize];
 
-        let header_form = HeaderForm::from_num(rand(4));
+        let header_form = HeaderForm::long();
         let fixed_bit = SingleBit::from_num(rand(2));
         let long_packet_type = match header_type {
             0 => LongPacketType::initial(),
@@ -312,13 +374,42 @@ mod test_header {
         })
     }
 
+    fn generate_random_short_header() -> Header {
+        let header_form = HeaderForm::short();
+        let fixed_bit = SingleBit::from_num(rand(2));
+        let spin_bit = SingleBit::from_num(rand(2));
+        let reserved_bits = TwoBits::from_num(rand(4));
+        let key_phase = SingleBit::from_num(rand(2));
+        let number_len = TwoBits::from_num(rand(4));
+        let dst_cid_len = rand(20);
+        let mut dst_cid_data = Vec::with_capacity(dst_cid_len as usize);
+        for _ in 0..dst_cid_len {
+            dst_cid_data.push(rand(256));
+        }
+        let mut number = Vec::with_capacity(number_len.to_inner() as usize);
+        for _ in 0..4 {
+            number.push(rand(256));
+        }
+
+        Header::Short(ShortHeader {
+            header_form,
+            fixed_bit,
+            spin_bit,
+            reserved_bits,
+            key_phase,
+            number_len,
+            dst_cid: ConnectionId::new(dst_cid_len, dst_cid_data),
+            number,
+        })
+    }
+
     #[test]
     fn test_long_encode_decode() {
         let original_initial_header = Header::Initial(LongHeader::initial(
             1,
             ConnectionId::new(8, vec![0; 8]),
             ConnectionId::new(8, vec![0; 8]),
-            FourBits::zero(),
+            FourBits::from_num(3),
         ));
 
         let mut initial_header_bytes = original_initial_header.encode().unwrap();
@@ -337,7 +428,30 @@ mod test_header {
         }
     }
 
-    fn _test_short_encode_decode() {
-        unimplemented!()
+    #[test]
+    fn test_short_encode_decode() {
+        let original_one_rtt_header = Header::Short(ShortHeader::one_rtt(
+            SingleBit::zero(),
+            TwoBits::zero(),
+            SingleBit::one(),
+            TwoBits::from_num(3),
+            ConnectionId::new(8, vec![0; 8]),
+            vec![0, 1, 0, 1],
+        ));
+
+        let mut one_rtt_header_bytes = original_one_rtt_header.encode().unwrap();
+
+        let reconstructed_one_rtt_header = Header::decode(&mut one_rtt_header_bytes);
+
+        assert_eq!(original_one_rtt_header, reconstructed_one_rtt_header);
+
+        let num_headers = 100;
+        for i in 0..num_headers {
+            println!("Testing random short header {}", i);
+            let original_header = generate_random_short_header();
+            let mut header_bytes = original_header.encode().unwrap();
+            let reconstructed_header = Header::decode(&mut header_bytes);
+            assert_eq!(original_header, reconstructed_header);
+        }
     }
 }

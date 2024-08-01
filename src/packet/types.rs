@@ -17,6 +17,17 @@ impl ConnectionId {
     }
 }
 
+#[derive(PartialEq, Debug)]
+pub struct PacketNumber {
+    pub num: u32,
+}
+
+impl PacketNumber {
+    pub fn new(num: u32) -> Self {
+        Self { num }
+    }
+}
+
 bits_ext!(SingleBit, crate::bits::BitsExt, 1, u8);
 bits_ext!(TwoBits, crate::bits::BitsExt, 2, u8);
 bits_ext!(FourBits, crate::bits::BitsExt, 4, u8);
@@ -42,11 +53,11 @@ impl LongPacketType {
 }
 
 impl HeaderForm {
-    pub fn long() -> Self {
+    pub fn short() -> Self {
         Self::zero()
     }
 
-    pub fn short() -> Self {
+    pub fn long() -> Self {
         Self::one()
     }
 }

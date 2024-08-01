@@ -4,8 +4,8 @@ use std::{
 };
 
 pub trait BitsExt {
-    fn new(bits: u8) -> Self;
     fn from_num(bits: u8) -> Self;
+    fn from_bits(bits: Vec<bool>) -> Self;
     fn to_inner(&self) -> u8;
     fn zero() -> Self;
     fn one() -> Self;
@@ -42,6 +42,13 @@ where
         }
     }
 
+    pub fn from_bits(bits: Vec<bool>) -> Self {
+        Self {
+            bits: bits.try_into().expect("properly sized bits"),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     pub fn to_inner(&self) -> T {
         let mut inner: T = T::from(0);
         for i in 0..N {
@@ -55,6 +62,30 @@ where
     pub fn bits(&self) -> &[bool] {
         &self.bits
     }
+}
+
+pub fn decompose_bits(mut source: u8, lenvec: &[u8]) -> Vec<Vec<bool>> {
+    let mut bitvec: Vec<Vec<bool>> = Vec::with_capacity(lenvec.len());
+
+    for &len in lenvec {
+        let mut current_bits: Vec<bool> = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            let bit = source & 1 == 1;
+            current_bits.push(bit);
+            source >>= 1;
+        }
+        bitvec.push(current_bits);
+    }
+
+    bitvec
+}
+
+pub fn compose_bits(bitvec: &[bool]) -> u8 {
+    let mut target: u8 = 0;
+    for (i, &bit) in bitvec.iter().enumerate() {
+        target |= (bit as u8) << (7 - i);
+    }
+    u8::reverse_bits(target)
 }
 
 #[cfg(test)]

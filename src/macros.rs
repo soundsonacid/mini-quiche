@@ -6,12 +6,12 @@ macro_rules! bits_ext {
         pub struct $structname(Bits<$len, $t>);
 
         impl $trait for $structname {
-            fn new(bits: u8) -> Self {
+            fn from_num(bits: u8) -> Self {
                 Self(Bits::from(bits))
             }
 
-            fn from_num(bits: u8) -> Self {
-                Self(Bits::from(bits))
+            fn from_bits(bits: Vec<bool>) -> Self {
+                Self(Bits::from_bits(bits))
             }
 
             fn to_inner(&self) -> u8 {
