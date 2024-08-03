@@ -3,10 +3,10 @@ use std::{
     ops::{BitAnd, BitOrAssign, Shl, Shr},
 };
 
-pub trait BitsExt {
-    fn from_num(bits: u8) -> Self;
+pub trait BitsExt<T> {
+    fn from_num(bits: T) -> Self;
     fn from_bits(bits: Vec<bool>) -> Self;
-    fn to_inner(&self) -> u8;
+    fn to_inner(&self) -> T;
     fn zero() -> Self;
     fn one() -> Self;
     fn bits(&self) -> &[bool];
@@ -59,7 +59,7 @@ where
         inner
     }
 
-    pub fn bits(&self) -> &[bool] {
+    pub const fn bits(&self) -> &[bool] {
         &self.bits
     }
 }

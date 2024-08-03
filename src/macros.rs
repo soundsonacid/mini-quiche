@@ -6,7 +6,7 @@ macro_rules! bits_ext {
         pub struct $structname(Bits<$len, $t>);
 
         impl $trait for $structname {
-            fn from_num(bits: u8) -> Self {
+            fn from_num(bits: $t) -> Self {
                 Self(Bits::from(bits))
             }
 
@@ -14,7 +14,7 @@ macro_rules! bits_ext {
                 Self(Bits::from_bits(bits))
             }
 
-            fn to_inner(&self) -> u8 {
+            fn to_inner(&self) -> $t {
                 self.0.to_inner()
             }
 
@@ -31,4 +31,19 @@ macro_rules! bits_ext {
             }
         }
     };
+}
+
+#[macro_export]
+macro_rules! frame {
+    {$($typename:ident = $encoding:expr,)*} => {
+        #[allow(non_camel_case_types)]
+        #[derive(Debug, PartialEq)]
+        pub enum FrameType {
+            $($typename),*
+        }
+
+        impl FrameType {
+            $(pub const $typename: u64 = $encoding;)*
+        }
+    }
 }

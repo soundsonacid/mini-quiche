@@ -28,11 +28,12 @@ impl PacketNumber {
     }
 }
 
-bits_ext!(SingleBit, crate::bits::BitsExt, 1, u8);
-bits_ext!(TwoBits, crate::bits::BitsExt, 2, u8);
-bits_ext!(FourBits, crate::bits::BitsExt, 4, u8);
-bits_ext!(LongPacketType, crate::bits::BitsExt, 2, u8);
-bits_ext!(HeaderForm, crate::bits::BitsExt, 1, u8);
+bits_ext!(SingleBit, crate::bits::BitsExt<u8>, 1, u8);
+bits_ext!(TwoBits, crate::bits::BitsExt<u8>, 2, u8);
+bits_ext!(FourBits, crate::bits::BitsExt<u8>, 4, u8);
+bits_ext!(SevenBits, crate::bits::BitsExt<u8>, 7, u8);
+bits_ext!(LongPacketType, crate::bits::BitsExt<u8>, 2, u8);
+bits_ext!(HeaderForm, crate::bits::BitsExt<u8>, 1, u8);
 
 impl LongPacketType {
     pub fn initial() -> Self {

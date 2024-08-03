@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 pub type QuicheResult<T> = Result<T, QuicheError>;
 
 #[derive(Debug)]
-pub struct QuicheError(String);
+pub struct QuicheError(pub(crate) String);
 
 impl Error for QuicheError {}
 

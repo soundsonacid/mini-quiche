@@ -1,6 +1,7 @@
 use crate::{
     bits::{compose_bits, decompose_bits, BitsExt},
     result::{require, QuicheResult},
+    VarInt,
 };
 
 use super::types::*;
@@ -24,6 +25,7 @@ use super::types::*;
 pub enum Header {
     Initial(LongHeader),
     Retry(LongHeader),
+    VersionNegotiate(LongHeader),
     Long(LongHeader),
     Short(ShortHeader),
 }
@@ -38,11 +40,96 @@ impl Header {
 
     pub fn encode(&self) -> QuicheResult<Vec<u8>> {
         match self {
-            Header::Initial(header) | Header::Retry(header) | Header::Long(header) => {
-                header.encode()
-            }
+            Header::Initial(header)
+            | Header::Retry(header)
+            | Header::VersionNegotiate(header)
+            | Header::Long(header) => header.encode(),
             Header::Short(header) => header.encode(),
         }
+    }
+}
+
+#[derive(PartialEq, Debug)]
+pub enum LongHeaderExtensions {
+    Initial {
+        token_length: VarInt,
+        token: Vec<u8>,
+        length: VarInt,
+        packet_number: u32,
+    },
+    ZeroRTT {
+        length: VarInt,
+        packet_number: u32,
+    },
+    Handshake {
+        length: VarInt,
+        packet_number: u32,
+    },
+    Retry {
+        retry_token: Vec<u8>,
+    },
+    VersionNegotiation {
+        supported_versions: Vec<u32>,
+    },
+}
+
+impl LongHeaderExtensions {
+    pub fn decode(bytes: &mut Vec<u8>, ty: u8) -> QuicheResult<Self> {
+        // really cheap hacky way of identifying what type of LongHeaderExtension this is...
+        match ty {
+            0 => {
+                unimplemented!()
+            }
+            1 => {
+                unimplemented!()
+            }
+            2 => {
+                unimplemented!()
+            }
+            3 => {
+                unimplemented!()
+            }
+            4 => {
+                unimplemented!()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn encode(&self) -> QuicheResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        match self {
+            LongHeaderExtensions::Initial {
+                token_length,
+                token,
+                length,
+                packet_number,
+            } => {
+                bytes.extend(token_length.encode());
+                bytes.extend(token.iter());
+                bytes.extend(length.encode());
+                bytes.extend(packet_number.to_le_bytes());
+            }
+            LongHeaderExtensions::ZeroRTT {
+                length,
+                packet_number,
+            }
+            | LongHeaderExtensions::Handshake {
+                length,
+                packet_number,
+            } => {
+                bytes.extend(length.encode());
+                bytes.extend(packet_number.to_le_bytes())
+            }
+            LongHeaderExtensions::Retry { retry_token } => {
+                bytes.extend(retry_token.iter());
+            }
+            LongHeaderExtensions::VersionNegotiation { supported_versions } => {
+                bytes.extend(supported_versions.iter().flat_map(|v| v.to_le_bytes()));
+            }
+        }
+
+        Ok(bytes)
     }
 }
 
@@ -73,6 +160,24 @@ impl LongHeader {
         // TODO: this is horrible why is this check here
         require(len <= 47, "LongHeader length must not exceed 47 bytes")?;
         Ok(len.into())
+    }
+
+    pub fn new(
+        long_packet_type: LongPacketType,
+        type_specific_bits: FourBits,
+        version_id: u32,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+    ) -> Self {
+        Self {
+            header_form: HeaderForm::long(),
+            fixed_bit: SingleBit::one(),
+            long_packet_type,
+            type_specific_bits,
+            version_id,
+            dst_cid,
+            src_cid,
+        }
     }
 
     // least significant 2 bits - reserved bits
@@ -224,6 +329,26 @@ impl ShortHeader {
         Ok(len.into())
     }
 
+    pub fn new(
+        spin_bit: SingleBit,
+        reserved_bits: TwoBits,
+        key_phase: SingleBit,
+        number_len: TwoBits,
+        dst_cid: ConnectionId,
+        number: Vec<u8>,
+    ) -> Self {
+        Self {
+            header_form: HeaderForm::short(),
+            fixed_bit: SingleBit::one(),
+            spin_bit,
+            reserved_bits,
+            key_phase,
+            number_len,
+            dst_cid,
+            number,
+        }
+    }
+
     pub fn one_rtt(
         spin_bit: SingleBit,
         reserved_bits: TwoBits,
@@ -271,7 +396,10 @@ impl ShortHeader {
         let dst_cid_len = bytes.remove(0);
         let dst_cid_data = bytes.drain(0..dst_cid_len as usize).collect::<Vec<u8>>();
 
-        let number = bytes.drain(0..4).collect::<Vec<u8>>();
+        // +1 because number len is one less than size of number in bytes
+        let number = bytes
+            .drain(0..(number_len.to_inner() as usize + 1))
+            .collect::<Vec<u8>>();
 
         require(
             bytes.is_empty(),
@@ -317,11 +445,11 @@ impl ShortHeader {
 }
 
 #[cfg(test)]
-mod test_header {
+pub mod test_header {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn rand(modulus: u128) -> u8 {
+    pub fn rand(modulus: u128) -> u8 {
         (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -329,7 +457,7 @@ mod test_header {
             % modulus) as u8
     }
 
-    fn generate_random_long_header() -> Header {
+    pub fn generate_random_long_header() -> Header {
         let header_type = rand(3);
         let header_enum_gen = vec![Header::Initial, Header::Retry, Header::Long];
         let header_enum = header_enum_gen[header_type as usize];
@@ -374,7 +502,7 @@ mod test_header {
         })
     }
 
-    fn generate_random_short_header() -> Header {
+    pub fn generate_random_short_header() -> Header {
         let header_form = HeaderForm::short();
         let fixed_bit = SingleBit::from_num(rand(2));
         let spin_bit = SingleBit::from_num(rand(2));
@@ -387,7 +515,7 @@ mod test_header {
             dst_cid_data.push(rand(256));
         }
         let mut number = Vec::with_capacity(number_len.to_inner() as usize);
-        for _ in 0..4 {
+        for _ in 0..number_len.to_inner() + 1 {
             number.push(rand(256));
         }
 
@@ -413,6 +541,8 @@ mod test_header {
         ));
 
         let mut initial_header_bytes = original_initial_header.encode().unwrap();
+
+        dbg!(initial_header_bytes.clone());
 
         let reconstructed_initial_header = Header::decode(&mut initial_header_bytes);
 
@@ -440,6 +570,8 @@ mod test_header {
         ));
 
         let mut one_rtt_header_bytes = original_one_rtt_header.encode().unwrap();
+
+        dbg!(one_rtt_header_bytes.clone());
 
         let reconstructed_one_rtt_header = Header::decode(&mut one_rtt_header_bytes);
 
