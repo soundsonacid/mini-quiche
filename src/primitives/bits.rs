@@ -10,9 +10,10 @@ pub trait BitsExt<T> {
     fn zero() -> Self;
     fn one() -> Self;
     fn bits(&self) -> &[bool];
+    fn invert(&self) -> Self;
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Bits<const N: usize, T> {
     pub bits: [bool; N],
     _phantom: std::marker::PhantomData<T>,
@@ -34,6 +35,7 @@ where
             let bit = (bytes >> i) & T::from(1) == T::from(1);
             bits.push(bit);
         }
+
         Self {
             bits: bits
                 .try_into()
@@ -59,8 +61,15 @@ where
         inner
     }
 
+    #[inline(always)]
     pub const fn bits(&self) -> &[bool] {
         &self.bits
+    }
+
+    pub fn invert(&self) -> Self {
+        let mut inverted = self.clone();
+        inverted.bits.reverse();
+        inverted
     }
 }
 
@@ -85,7 +94,8 @@ pub fn compose_bits(bitvec: &[bool]) -> u8 {
     for (i, &bit) in bitvec.iter().enumerate() {
         target |= (bit as u8) << (7 - i);
     }
-    u8::reverse_bits(target)
+    target
+    // u8::reverse_bits(target)
 }
 
 #[cfg(test)]

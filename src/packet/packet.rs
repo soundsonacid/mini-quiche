@@ -1,17 +1,14 @@
-use crate::{
-    bits::{decompose_bits, BitsExt},
-    result::QuicheResult,
-};
+use crate::{bits::BitsExt, result::QuicheResult, VarInt};
 
 use super::{
-    header::{Header, LongHeader, ShortHeader},
-    ConnectionId, FourBits, HeaderForm, LongPacketType, SingleBit, TwoBits,
+    header::{Header, LongHeader, LongHeaderExtension, ShortHeader},
+    ConnectionId, FourBits, HeaderForm, LongPacketType, PacketNumber, SingleBit, TwoBits,
 };
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Packet {
     pub header: Header,
-    pub payload: Vec<u8>,
+    pub payload: Vec<u8>, // TODO: change to Vec<Frame>
 }
 
 impl Packet {
@@ -25,6 +22,10 @@ impl Packet {
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         type_specific_bits: FourBits,
+        token_length: VarInt,
+        token: Vec<u8>,
+        length: VarInt,
+        packet_number: PacketNumber,
         payload: Vec<u8>,
     ) -> Self {
         let header = Header::Initial(LongHeader::initial(
@@ -32,6 +33,10 @@ impl Packet {
             dst_cid,
             src_cid,
             type_specific_bits,
+            token_length,
+            token,
+            length,
+            packet_number,
         ));
         Self { header, payload }
     }
@@ -42,6 +47,7 @@ impl Packet {
         version_id: u32,
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
+        extension: LongHeaderExtension,
         payload: Vec<u8>,
     ) -> Self {
         let header = Header::Long(LongHeader::new(
@@ -50,6 +56,7 @@ impl Packet {
             version_id,
             dst_cid,
             src_cid,
+            extension,
         ));
         Self { header, payload }
     }
@@ -81,49 +88,44 @@ impl Packet {
     }
 
     pub fn decode(bytes: &mut Vec<u8>) -> QuicheResult<Self> {
-        match bytes[0] & 1 == HeaderForm::short().to_inner() {
+        match bytes[0] & 0b10_000000 == HeaderForm::short().to_inner() {
             true => return Packet::decode_short_header(bytes),
             false => return Packet::decode_long_header(bytes),
         }
     }
 
     fn decode_long_header(bytes: &mut Vec<u8>) -> QuicheResult<Self> {
-        let dst_cid_len = bytes
-            .get(5)
-            .expect("No destination connection ID length found");
-        let src_cid_len = bytes
-            .get(5 + *dst_cid_len as usize + 1)
-            .expect("No source connection ID length found");
-        let end_of_header = 1 + 4 + 1 + dst_cid_len + 1 + src_cid_len;
-        let mut header_bytes = bytes
-            .drain(0..(end_of_header as usize))
-            .collect::<Vec<u8>>();
+        let dst_cid_len = bytes[5] as usize;
+        let src_cid_len = bytes[5 + dst_cid_len + 1] as usize;
+
+        let header_len = 1 + 4 + 1 + dst_cid_len + 1 + src_cid_len;
+        let header_ext_len = LongHeader::extension_length(&mut bytes.clone());
+
+        let mut header_bytes = bytes.drain(..header_len + header_ext_len).collect();
+
+        // drains everything except payload
         let decoded_header = LongHeader::decode(&mut header_bytes)?;
-        // at this point the only remaining bytes should be the payload
-        let payload = bytes.clone();
+
         Ok(Self {
             header: decoded_header,
-            payload,
+            payload: bytes.clone(),
         })
     }
 
     fn decode_short_header(bytes: &mut Vec<u8>) -> QuicheResult<Self> {
-        let first_byte = bytes.get(0).expect("first byte").clone();
-        let bits = decompose_bits(first_byte, &[6, 2]);
-        let number_len = TwoBits::from_bits(bits.get(1).unwrap().clone()).to_inner() + 1; // one less than size of number in bytes
-        let dst_cid_len = bytes
-            .get(1)
-            .expect("No destination connection ID length found");
-        let end_of_header = 1 + 1 + dst_cid_len + number_len;
-        let mut header_bytes = bytes
-            .drain(0..(end_of_header as usize))
-            .collect::<Vec<u8>>();
+        let number_len = TwoBits::from_num(bytes[0] & 0b00_000011);
+        let dst_cid_len = bytes[1] as usize;
+
+        let header_len = 1 + 1 + dst_cid_len + number_len.invert().to_inner() as usize + 1;
+
+        let mut header_bytes = bytes.drain(..header_len).collect();
+
+        // drains everything except payload
         let decoded_header = ShortHeader::decode(&mut header_bytes)?;
-        // at this point the only remaining bytes should be the payload
-        let payload = bytes.clone();
+
         Ok(Self {
             header: decoded_header,
-            payload,
+            payload: bytes.clone(),
         })
     }
 }
@@ -150,7 +152,11 @@ mod test {
             ConnectionId::new(8, vec![0; 8]),
             ConnectionId::new(8, vec![0; 8]),
             FourBits::from_num(3),
-            vec![0; 8],
+            VarInt::new_u32(8),
+            vec![1, 0, 1, 0, 1, 0, 1, 0],
+            VarInt::new_u32(12),
+            PacketNumber(VarInt::new_u32(8)),
+            vec![0, 1, 0, 1, 0, 1, 0, 1],
         );
 
         let mut initial_packet_bytes = original_initial_packet.encode().unwrap();

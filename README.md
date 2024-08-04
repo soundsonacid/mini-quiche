@@ -101,6 +101,44 @@ extending these headers has proven to be not fun at all.  i ended up taking some
 honestly, probably going to call it here for the night.  i'm still a little sick and my brain is still feeling a little clogged, but that's no excuse.  i'm just having a hard time locking in. gonna go read about probability.  major skill issue.  tomorrow, i will get through headers, frames, packets, and start working on the handshake.  
 
 TODO next time:  
-1. Fix `LongHeader`  
+1. Fix `LongHeader`  ✅  
 2. Finish `Frame`  
 3. Prototype handshake  
+
+### 8/3
+12:12 pm  
+just finished `VarInt`.  pretty happy with it, i think it'll work well.  probably took like an hour or so?  gonna take a break for a couple hours to do some other stuff and then come back to this later.  i'm optimistic about today's progress!  
+
+5:30 pm  
+spent the last 30 minutes or so refactoring `LongHeader::decode()` to work and tests to pass, but now that i'm doing `Packet` long header decodes i'm realizing that i might have written myself into a wall here.  right now i can't really tell if there is a reliable way to identify how long a given `LongHeaderExtension` is with nothing but the raw bytes, or if there is, it's probably pretty annoying to do... i'll figure that out tho and try to get through at least `Packet` and `Frame` today.  i'm definitely behind where i wanted to be by this point.  
+
+5:42 pm  
+while putting off long header stuff and trying to clean up `Packet::decode()` for short headers, i seem to have found a pretty weird bug regarding `number_len` and `PacketNumber`s.  gonna figure this out before doing anything else.  maybe i'll have an idea about long headers in the process.  
+
+5:50 pm  
+lol.  figured it out.  i have no idea why i decided to reverse the bits of the encoded headers s.t. later fields are higher up in the first byte.  
+
+i think that was a pretty stupid design decision but i'm almost too far along to go in and change it.  it shouldn't cause any problems as long as i keep it in mind though, so no big deal.  gonna try and figure out long header extensions now.  
+
+i think that if i can keep all the slop and garbage code contained within `header.rs` i'll be fine, i just don't want the slop from there to infect other files lol.    
+
+6:08 pm  
+i thought that my test suite was fine, but i just cannot stop finding little hidden bugs!  it is good enough that my tests catch them, but i have to think "something isn't right here..." and then make a change for it to really show up in the tests.  i would like to figure out some way that any changes i make are going to break tests.  i'll have to think more on that.  
+
+6:52 pm  
+ok.  figured out a way to do it that's bad but not _horrible_, and the slop is contained within `header.rs`, so things are all good.  going to finish `Frame` now and stat integrating them with `Packet` in hopes of being able to start working on the handshake either tonight (if i'm lucky) or tomorrow.  
+
+7:30 pm  
+i think i've landed on a pretty good design for `Frame`.  granted, i did take a lot of inspiration from quinn regarding what makes sense to do.  i think it's fair to have taken some code from quinn, even though i didn't really want to, it just sped up the process a lot.  i'm not doing this to learn rust, i'm doing this to learn quic.  
+
+8:35 pm  
+took a walk.  on the walk i realized that the reversing bits of encoding headers choice violates the spec.  going to fix that.  
+
+9:39 pm  
+i am just building on a mountain of debt right now, i can feel it.  the amount of time it took for me to fix the reversing bits bug was incredible - i've been working on it for the last hour and just finished it.  i _think_ that since all the debt is internal logic and not spec-violating stuff (specifically the way the `Bits` object works) it _should_ be fine?  i am pretty sure that i am able to ingest stuff according to the quic spec and properly encode / decode it, but i'm still not sure.  i guess we'll find out!  probably going to call it here for tonight.  
+
+not super satisfied with the forward progress today (didn't finish `Frame` or start handshake), but i am glad that i got a lot of really nasty bugs solved and out of the way.  
+
+TODO next time:
+1. Finish `Frame`
+2. Prototype handshake
