@@ -1,4 +1,7 @@
+use crate::result::QuicheError;
+
 #[repr(u64)]
+#[derive(Debug)]
 pub enum ProtocolError {
     NoError = 0x00,
     InternalError = 0x01,
@@ -41,11 +44,17 @@ impl ProtocolError {
             0x0f => ProtocolError::AeadLimitReached,
             0x10 => ProtocolError::NoViablePath,
             0x0100..=0x01ff => ProtocolError::CryptoError(value),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
     pub fn is_protocol_error(code: u64) -> bool {
         matches!(code, 0x00..=0x10) || matches!(code, 0x0100..=0x01ff)
+    }
+}
+
+impl Into<QuicheError> for ProtocolError {
+    fn into(self) -> QuicheError {
+        QuicheError(format!("Transport error: {:?}", self))
     }
 }

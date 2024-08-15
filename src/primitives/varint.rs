@@ -79,7 +79,7 @@ impl VarInt {
 
     pub fn decode(bytes: &mut Vec<u8>) -> QuicheResult<Self> {
         if bytes.is_empty() {
-            return Ok(Self::new_u32(0))
+            return Ok(Self::new_u32(0));
         }
         let first_byte = bytes.remove(0);
         let disc = (first_byte & 0b11_000000) >> 6;
@@ -91,6 +91,46 @@ impl VarInt {
         }
 
         Self::new_u64(val)
+    }
+
+    pub fn sub(&self, other: &Self) -> QuicheResult<Self> {
+        Ok(self
+            .0
+            .checked_sub(other.0)
+            .and_then(|v| Some(Self::new_u64(v).expect("new u64")))
+            .expect("and then"))
+    }
+
+    pub fn subn(&self, n: u64) -> QuicheResult<Self> {
+        Ok(self
+            .0
+            .checked_sub(n)
+            .and_then(|v| Some(Self::new_u64(v).expect("new u64")))
+            .expect("and then"))
+    }
+
+    pub fn add(&self, other: &Self) -> QuicheResult<Self> {
+        Ok(self
+            .0
+            .checked_add(other.0)
+            .and_then(|v| Some(Self::new_u64(v).unwrap()))
+            .unwrap())
+    }
+
+    pub fn addn(&self, n: u64) -> QuicheResult<Self> {
+        Ok(self
+            .0
+            .checked_add(n)
+            .and_then(|v| Some(Self::new_u64(v).unwrap()))
+            .unwrap())
+    }
+
+    pub fn ltn(&self, n: u64) -> bool {
+        self.0 < n
+    }
+
+    pub fn gtn(&self, n: u64) -> bool {
+        self.0 > n
     }
 }
 

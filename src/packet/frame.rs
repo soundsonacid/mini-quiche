@@ -60,7 +60,7 @@ frame! {
     ACK_ECN = 0x03,
     // a reset stream frame is used to abruptly terminate the sending part of a stream
     // a receiver of reset stream can discard any data it's already received
-    // an endpoin that receives a reset stream frame for a send only stream MUST terminate the connection with STREAM_STATE_ERROR
+    // an endpoint that receives a reset stream frame for a send only stream MUST terminate the connection with STREAM_STATE_ERROR
     // reset stream frames contain the following fields:
     // 1. stream id: a variable-length int encoding of the stream id being terminated
     //
@@ -460,7 +460,7 @@ impl Frame {
                 if length.to_inner() > 0 {
                     ty |= 0x02;
                 }
-                if offset.to_inner() == 1 {
+                if offset.to_inner() > 0 {
                     ty |= 0x04;
                 }
                 buf.push(ty);
@@ -483,10 +483,7 @@ impl Frame {
                 buf.extend(stream_id.encode());
                 buf.extend(max_stream_data.encode());
             }
-            MaxStreams {
-                max_streams,
-                ..
-            } => {
+            MaxStreams { max_streams, .. } => {
                 buf.extend(max_streams.encode());
             }
             DataBlocked(maximum_data) => {
@@ -499,10 +496,7 @@ impl Frame {
                 buf.extend(stream_id.encode());
                 buf.extend(stream_data_limit.encode());
             }
-            StreamsBlocked {
-                max_streams,
-                ..
-            } => {
+            StreamsBlocked { max_streams, .. } => {
                 buf.extend(max_streams.encode());
             }
             NewConnectionId {
@@ -555,10 +549,24 @@ impl Frame {
                 let ack_delay = VarInt::decode(bytes)?;
                 let ack_range_count = VarInt::decode(bytes)?;
                 let first_ack_range = VarInt::decode(bytes)?;
-                let mut ack_ranges: Vec<(VarInt, VarInt)> = Vec::with_capacity(ack_range_count.usize());
+                let mut ack_ranges: Vec<(VarInt, VarInt)> =
+                    Vec::with_capacity(ack_range_count.usize());
+                let mut next_smallest = largest_acknowledged.sub(&first_ack_range)?;
+
                 for _ in 0..ack_range_count.to_inner() {
                     let gap = VarInt::decode(bytes)?;
                     let ack_range_length = VarInt::decode(bytes)?;
+
+                    if gap.addn(2)?.gt(&next_smallest) {
+                        return Err(ProtocolError::FrameEncodingError.into());
+                    }
+
+                    next_smallest = next_smallest.sub(&gap.addn(2)?)?;
+
+                    if ack_range_length.gt(&next_smallest) {
+                        return Err(ProtocolError::FrameEncodingError.into());
+                    }
+
                     ack_ranges.push((gap, ack_range_length));
                 }
                 Ok(Frame::Ack {
@@ -568,16 +576,30 @@ impl Frame {
                     first_ack_range,
                     ack_ranges,
                 })
-            },
+            }
             FrameType::ACK_ECN => {
                 let largest_acknowledged = VarInt::decode(bytes)?;
                 let ack_delay = VarInt::decode(bytes)?;
                 let ack_range_count = VarInt::decode(bytes)?;
                 let first_ack_range = VarInt::decode(bytes)?;
-                let mut ack_ranges: Vec<(VarInt, VarInt)> = Vec::with_capacity(ack_range_count.usize());
+                let mut ack_ranges: Vec<(VarInt, VarInt)> =
+                    Vec::with_capacity(ack_range_count.usize());
+                let mut next_smallest = largest_acknowledged.sub(&first_ack_range)?;
+
                 for _ in 0..ack_range_count.to_inner() {
                     let gap = VarInt::decode(bytes)?;
                     let ack_range_length = VarInt::decode(bytes)?;
+
+                    if gap.addn(2)?.gt(&next_smallest) {
+                        return Err(ProtocolError::FrameEncodingError.into());
+                    }
+
+                    next_smallest = next_smallest.sub(&gap.addn(2)?)?;
+
+                    if ack_range_length.gt(&next_smallest) {
+                        return Err(ProtocolError::FrameEncodingError.into());
+                    }
+
                     ack_ranges.push((gap, ack_range_length));
                 }
                 let ect0_count = VarInt::decode(bytes)?;
@@ -593,7 +615,7 @@ impl Frame {
                     ect1_count,
                     ecn_ce_count,
                 })
-            },
+            }
             FrameType::RESET_STREAM => {
                 let stream_id = VarInt::decode(bytes)?;
                 let application_protocol_error_code = VarInt::decode(bytes)?;
@@ -603,7 +625,7 @@ impl Frame {
                     application_protocol_error_code,
                     final_size,
                 })
-            },
+            }
             FrameType::STOP_SENDING => {
                 let stream_id = VarInt::decode(bytes)?;
                 let application_protocol_error_code = VarInt::decode(bytes)?;
@@ -611,17 +633,22 @@ impl Frame {
                     stream_id,
                     application_protocol_error_code,
                 })
-            },
+            }
             FrameType::CRYPTO => {
                 let offset = VarInt::decode(bytes)?;
                 let crypto_length = VarInt::decode(bytes)?;
                 let crypto_data = bytes.drain(..crypto_length.usize()).collect();
+
+                if offset.add(&crypto_length)?.gtn(2 << 62 - 1) {
+                    return Err(ProtocolError::CryptoBufferExceeded.into());
+                }
+
                 Ok(Frame::Crypto {
                     offset,
                     crypto_length,
                     crypto_data,
                 })
-            },
+            }
             FrameType::NEW_TOKEN => {
                 let token_length = VarInt::decode(bytes)?;
                 let token = bytes.drain(..token_length.usize()).collect();
@@ -629,7 +656,7 @@ impl Frame {
                     token_length,
                     token,
                 })
-            },
+            }
             ty if STREAM_RANGE.contains(&ty) => {
                 let stream_ty = bytes.remove(0);
                 let stream_id = VarInt::decode(bytes)?;
@@ -642,12 +669,12 @@ impl Frame {
                     fin = SingleBit::one();
                 }
 
-                if (stream_ty & STREAM_LEN) != 0 {
-                    length = Some(VarInt::decode(bytes)?);
-                }
-
                 if (stream_ty & STREAM_OFF) != 0 {
                     offset = Some(VarInt::decode(bytes)?);
+                }
+
+                if (stream_ty & STREAM_LEN) != 0 {
+                    length = Some(VarInt::decode(bytes)?);
                 }
 
                 let stream_data = if let Some(len) = length {
@@ -655,7 +682,7 @@ impl Frame {
                 } else {
                     bytes.drain(..).collect()
                 };
-                
+
                 Ok(Frame::Stream {
                     stream_id,
                     offset: offset.unwrap_or_default(),
@@ -663,11 +690,11 @@ impl Frame {
                     fin,
                     stream_data,
                 })
-            },
+            }
             FrameType::MAX_DATA => {
                 let maximum_data = VarInt::decode(bytes)?;
                 Ok(Frame::MaxData(maximum_data))
-            },
+            }
             FrameType::MAX_STREAM_DATA => {
                 let stream_id = VarInt::decode(bytes)?;
                 let max_stream_data = VarInt::decode(bytes)?;
@@ -675,25 +702,25 @@ impl Frame {
                     stream_id,
                     max_stream_data,
                 })
-            },
+            }
             FrameType::MAX_STREAMS_BIDI => {
                 let max_streams = VarInt::decode(bytes)?;
                 Ok(Frame::MaxStreams {
                     stream_type: StreamType::Bidirectional,
                     max_streams,
                 })
-            },
+            }
             FrameType::MAX_STREAMS_UNI => {
                 let max_streams = VarInt::decode(bytes)?;
                 Ok(Frame::MaxStreams {
                     stream_type: StreamType::Unidirectional,
                     max_streams,
                 })
-            },
+            }
             FrameType::DATA_BLOCKED => {
                 let maximum_data = VarInt::decode(bytes)?;
                 Ok(Frame::DataBlocked(maximum_data))
-            },
+            }
             FrameType::STREAM_DATA_BLOCKED => {
                 let stream_id = VarInt::decode(bytes)?;
                 let stream_data_limit = VarInt::decode(bytes)?;
@@ -701,25 +728,34 @@ impl Frame {
                     stream_id,
                     stream_data_limit,
                 })
-            },
+            }
             FrameType::STREAMS_BLOCKED_BIDI => {
                 let max_streams = VarInt::decode(bytes)?;
                 Ok(Frame::StreamsBlocked {
                     stream_type: StreamType::Bidirectional,
                     max_streams,
                 })
-            },
+            }
             FrameType::STREAMS_BLOCKED_UNI => {
                 let max_streams = VarInt::decode(bytes)?;
                 Ok(Frame::StreamsBlocked {
                     stream_type: StreamType::Unidirectional,
                     max_streams,
                 })
-            },
+            }
             FrameType::NEW_CONNECTION_ID => {
                 let sequence_number = VarInt::decode(bytes)?;
                 let retire_prior_to = VarInt::decode(bytes)?;
                 let cid_len = bytes.remove(0);
+
+                if cid_len.lt(&1) || cid_len.gt(&20) {
+                    return Err(ProtocolError::FrameEncodingError.into());
+                }
+
+                if retire_prior_to.gt(&sequence_number) {
+                    return Err(ProtocolError::FrameEncodingError.into());
+                }
+
                 let cid = bytes.drain(..cid_len as usize).collect();
                 let stateless_reset_token = bytes.drain(..16).collect::<Vec<u8>>();
                 Ok(Frame::NewConnectionId {
@@ -728,19 +764,19 @@ impl Frame {
                     connection_id: ConnectionId { cid_len, cid },
                     stateless_reset_token: stateless_reset_token.try_into().unwrap(),
                 })
-            },
+            }
             FrameType::RETIRE_CONNECTION_ID => {
                 let sequence_number = VarInt::decode(bytes)?;
                 Ok(Frame::RetireConnectionId(sequence_number))
-            },
+            }
             FrameType::PATH_CHALLENGE => {
                 let challenge = bytes.drain(..8).collect::<Vec<u8>>();
                 Ok(Frame::PathChallenge(challenge.try_into().unwrap()))
-            },
+            }
             FrameType::PATH_RESPONSE => {
                 let response = bytes.drain(..8).collect::<Vec<u8>>();
                 Ok(Frame::PathResponse(response.try_into().unwrap()))
-            },
+            }
             FrameType::CONNECTION_CLOSE_TRANSPORT => {
                 let error_code = VarInt::decode(bytes)?;
                 let frame_type = bytes.remove(0);
@@ -753,7 +789,7 @@ impl Frame {
                     reason_phrase_length,
                     reason_phrase,
                 })
-            },
+            }
             FrameType::CONNECTION_CLOSE_APPLICATION => {
                 let error_code = VarInt::decode(bytes)?;
                 let reason_phrase_length = VarInt::decode(bytes)?;
@@ -765,8 +801,8 @@ impl Frame {
                     reason_phrase_length,
                     reason_phrase,
                 })
-            },
-            _ => unreachable!()
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -775,57 +811,140 @@ impl Frame {
 pub(crate) mod test_frame {
     use super::*;
     use crate::rand::rand;
-    // use crate::packet::header::test_header::rand;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    pub fn rand_u64(modulus: u128) -> u64 {
-        (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            % modulus) as u64
-    }
 
     pub fn generate_random_frame() -> Frame {
         let ty = rand(31);
         match ty {
             0x00 => Frame::Padding,
             0x01 => Frame::Ping,
-            0x02 => { 
-                let largest_acknowledged = VarInt::new_u32(rand(9) as u32);
+            0x02 => {
+                let largest_acknowledged = VarInt::new_u32(rand(1000) as u32);
                 let ack_delay = VarInt::new_u32(7);
                 let ack_range_count = VarInt::new_u32(4);
-                let first_ack_range = VarInt::new_u32(0);
-                let ack_ranges = (0..ack_range_count.to_inner()).map(|_| {
-                    let gap = VarInt::new_u32(rand(9) as u32);
-                    let ack_range_length = VarInt::new_u32(rand(9) as u32);
-                    (gap, ack_range_length)
-                }).collect();
+                let first_ack_range =
+                    VarInt::new_u32(rand((largest_acknowledged.to_inner() + 1) as u128) as u32);
+
+                let mut remaining = largest_acknowledged.sub(&first_ack_range).unwrap();
+                if remaining.lt(&VarInt::new_u32(8)) {
+                    return Frame::Ack {
+                        largest_acknowledged,
+                        ack_delay,
+                        ack_range_count: VarInt::new_u32(0),
+                        first_ack_range,
+                        ack_ranges: vec![],
+                    };
+                }
+
+                let ack_ranges: Vec<(VarInt, VarInt)> = (0..ack_range_count.to_inner())
+                    .map(|_| {
+                        let gap = if remaining.to_inner() > 2 {
+                            let max_gap = remaining.to_inner() - 2;
+                            VarInt::new_u32(rand((max_gap + 1) as u128) as u32)
+                        } else {
+                            VarInt::zero()
+                        };
+
+                        remaining = if gap.to_inner() + 2 < remaining.to_inner() {
+                            remaining.sub(&gap.addn(2).unwrap()).unwrap()
+                        } else {
+                            VarInt::zero()
+                        };
+
+                        let ack_range_length = if remaining.to_inner() > 0 {
+                            VarInt::new_u32(rand((remaining.to_inner() + 1) as u128) as u32)
+                        } else {
+                            VarInt::zero()
+                        };
+
+                        remaining = if ack_range_length.to_inner() < remaining.to_inner() {
+                            remaining.sub(&ack_range_length).unwrap()
+                        } else {
+                            VarInt::zero()
+                        };
+
+                        (gap, ack_range_length)
+                    })
+                    .take_while(|(gap, ack_range_length)| {
+                        gap.to_inner() > 0 || ack_range_length.to_inner() > 0
+                    })
+                    .collect();
+
+                let actual_ack_range_count = VarInt::new_u32(ack_ranges.len() as u32);
+
                 Frame::Ack {
                     largest_acknowledged,
                     ack_delay,
-                    ack_range_count,
+                    ack_range_count: actual_ack_range_count,
                     first_ack_range,
                     ack_ranges,
                 }
-            },
+            }
             0x03 => {
-                let largest_acknowledged = VarInt::new_u32(rand(9) as u32);
+                let largest_acknowledged = VarInt::new_u32(rand(1000) as u32);
                 let ack_delay = VarInt::new_u32(7);
-                let ack_range_count = VarInt::new_u32(4);
-                let first_ack_range = VarInt::new_u32(0);
+                let first_ack_range =
+                    VarInt::new_u32(rand((largest_acknowledged.to_inner() + 1) as u128) as u32);
                 let ect0_count = VarInt::new_u32(7);
                 let ect1_count = VarInt::new_u32(7);
                 let ecn_ce_count = VarInt::new_u32(7);
-                let ack_ranges = (0..ack_range_count.to_inner()).map(|_| {
-                    let gap = VarInt::new_u32(rand(9) as u32);
-                    let ack_range_length = VarInt::new_u32(rand(9) as u32);
-                    (gap, ack_range_length)
-                }).collect();
+
+                if largest_acknowledged
+                    .sub(&first_ack_range)
+                    .unwrap()
+                    .lt(&VarInt::new_u32(8))
+                {
+                    return Frame::AckEcn {
+                        largest_acknowledged,
+                        ack_delay,
+                        ack_range_count: VarInt::new_u32(0),
+                        first_ack_range,
+                        ack_ranges: vec![],
+                        ect0_count,
+                        ect1_count,
+                        ecn_ce_count,
+                    };
+                }
+
+                let mut remaining = largest_acknowledged.sub(&first_ack_range).unwrap();
+                let mut ack_ranges = Vec::new();
+
+                while remaining.to_inner() > 0 {
+                    if ack_ranges.len() >= 4 {
+                        // Limit to 4 ack ranges for this example
+                        break;
+                    }
+
+                    let max_gap = if remaining.to_inner() > 2 {
+                        remaining.to_inner() - 2
+                    } else {
+                        0
+                    };
+                    let gap = VarInt::new_u32(rand((max_gap + 1) as u128) as u32);
+
+                    if gap.to_inner() + 2 >= remaining.to_inner() {
+                        // If gap would make next_smallest zero or negative, break the loop
+                        break;
+                    }
+
+                    remaining = remaining.sub(&gap.addn(2).unwrap()).unwrap();
+
+                    let max_ack_range_length = remaining.to_inner();
+                    let ack_range_length =
+                        VarInt::new_u32(rand((max_ack_range_length + 1) as u128) as u32);
+
+                    remaining = if ack_range_length.to_inner() < remaining.to_inner() {
+                        remaining.sub(&ack_range_length).unwrap()
+                    } else {
+                        VarInt::zero()
+                    };
+
+                    ack_ranges.push((gap, ack_range_length));
+                }
+
                 Frame::AckEcn {
                     largest_acknowledged,
                     ack_delay,
-                    ack_range_count,
+                    ack_range_count: VarInt::new_u32(ack_ranges.len() as u32),
                     first_ack_range,
                     ack_ranges,
                     ect0_count,
@@ -842,7 +961,7 @@ pub(crate) mod test_frame {
                     application_protocol_error_code,
                     final_size,
                 }
-            },
+            }
             0x05 => {
                 let stream_id = VarInt::new_u32(rand(255) as u32);
                 let application_protocol_error_code = VarInt::new_u32(rand(255) as u32);
@@ -850,7 +969,7 @@ pub(crate) mod test_frame {
                     stream_id,
                     application_protocol_error_code,
                 }
-            },
+            }
             0x06 => {
                 let offset = VarInt::new_u32(rand(255) as u32);
                 let crypto_length = VarInt::new_u32(65);
@@ -863,7 +982,7 @@ pub(crate) mod test_frame {
                     crypto_length,
                     crypto_data,
                 }
-            },
+            }
             0x07 => {
                 let token_length = VarInt::new_u32(65);
                 let mut token = Vec::with_capacity(token_length.usize());
@@ -874,10 +993,10 @@ pub(crate) mod test_frame {
                     token_length,
                     token,
                 }
-            },
+            }
             stream_ty @ 0x08
             | stream_ty @ 0x09
-            | stream_ty @ 0x0a 
+            | stream_ty @ 0x0a
             | stream_ty @ 0x0b
             | stream_ty @ 0x0c
             | stream_ty @ 0x0d
@@ -889,25 +1008,25 @@ pub(crate) mod test_frame {
                 } else {
                     VarInt::default()
                 };
-            
+
                 let length = if (stream_ty & 0x02) != 0 {
                     VarInt::new_u32(rand(1024) as u32)
                 } else {
                     VarInt::default()
                 };
-            
+
                 let fin = if (stream_ty & 0x01) != 0 {
                     SingleBit::one()
                 } else {
                     SingleBit::zero()
                 };
-            
+
                 let stream_data = if length.0 > 0 {
                     (0..length.0).map(|_| rand(256) as u8).collect()
                 } else {
                     vec![rand(256) as u8; 64]
                 };
-            
+
                 Frame::Stream {
                     stream_id,
                     offset,
@@ -915,11 +1034,11 @@ pub(crate) mod test_frame {
                     fin,
                     stream_data,
                 }
-            },
+            }
             0x10 => {
                 let maximum_data = VarInt::new_u32(rand(255) as u32);
                 Frame::MaxData(maximum_data)
-            },
+            }
             0x11 => {
                 let stream_id = VarInt::new_u32(rand(255) as u32);
                 let max_stream_data = VarInt::new_u32(rand(255) as u32);
@@ -927,7 +1046,7 @@ pub(crate) mod test_frame {
                     stream_id,
                     max_stream_data,
                 }
-            },
+            }
             0x12 => {
                 let stream_type = StreamType::Bidirectional;
                 let max_streams = VarInt::new_u32(rand(255) as u32);
@@ -935,7 +1054,7 @@ pub(crate) mod test_frame {
                     stream_type,
                     max_streams,
                 }
-            },
+            }
             0x13 => {
                 let stream_type = StreamType::Unidirectional;
                 let max_streams = VarInt::new_u32(rand(255) as u32);
@@ -943,11 +1062,11 @@ pub(crate) mod test_frame {
                     stream_type,
                     max_streams,
                 }
-            },
+            }
             0x14 => {
                 let maximum_data = VarInt::new_u32(rand(255) as u32);
                 Frame::DataBlocked(maximum_data)
-            },
+            }
             0x15 => {
                 let stream_id = VarInt::new_u32(rand(255) as u32);
                 let stream_data_limit = VarInt::new_u32(rand(255) as u32);
@@ -955,7 +1074,7 @@ pub(crate) mod test_frame {
                     stream_id,
                     stream_data_limit,
                 }
-            },
+            }
             0x16 => {
                 let stream_type = StreamType::Bidirectional;
                 let max_streams = VarInt::new_u32(rand(255) as u32);
@@ -963,7 +1082,7 @@ pub(crate) mod test_frame {
                     stream_type,
                     max_streams,
                 }
-            },
+            }
             0x17 => {
                 let stream_type = StreamType::Unidirectional;
                 let max_streams = VarInt::new_u32(rand(255) as u32);
@@ -971,11 +1090,12 @@ pub(crate) mod test_frame {
                     stream_type,
                     max_streams,
                 }
-            },
+            }
             0x18 => {
                 let sequence_number = VarInt::new_u32(rand(255) as u32);
-                let retire_prior_to = VarInt::new_u32(rand(255) as u32);
-                let cid_len = rand(20) as u8;
+                let retire_prior_to =
+                    VarInt::new_u32(rand(sequence_number.to_inner() as u128) as u32);
+                let cid_len = rand(20) as u8 + 1;
                 let mut cid = Vec::with_capacity(cid_len as usize);
                 for _ in 0..cid_len {
                     cid.push(rand(255) as u8);
@@ -990,31 +1110,31 @@ pub(crate) mod test_frame {
                     connection_id: ConnectionId { cid_len, cid },
                     stateless_reset_token,
                 }
-            },
+            }
             0x19 => {
                 let sequence_number = VarInt::new_u32(rand(255) as u32);
                 Frame::RetireConnectionId(sequence_number)
-            },
+            }
             0x1a => {
                 let mut challenge = [0; 8];
                 for i in 0..8 {
                     challenge[i] = rand(255) as u8;
                 }
                 Frame::PathChallenge(challenge)
-            },
+            }
             0x1b => {
                 let mut response = [0; 8];
                 for i in 0..8 {
                     response[i] = rand(255) as u8;
                 }
                 Frame::PathResponse(response)
-            },
+            }
             0x1c => {
-                let error_code = match rand_u64(2) {
-                    0 => rand_u64(0x11),               
-                    1 => 0x0100 + rand_u64(0x0100),     
+                let error_code: u16 = match rand(2) {
+                    0 => rand(0x11) as u16,
+                    1 => 0x0100 + rand(0x0100) as u16,
                     _ => unreachable!(),
-                };                
+                };
                 let frame_type = rand(31);
                 let reason_phrase_length = VarInt::new_u32(rand(1948) as u32);
                 let mut reason_phrase = Vec::with_capacity(reason_phrase_length.usize());
@@ -1023,23 +1143,23 @@ pub(crate) mod test_frame {
                     reason_phrase.push(valid_char);
                 }
                 Frame::ConnectionClose {
-                    error_code: VarInt::new_u64(error_code).unwrap(),
+                    error_code: VarInt::new_u64(error_code as u64).unwrap(),
                     frame_type: Some(frame_type),
                     reason_phrase_length,
                     reason_phrase: String::from_utf8(reason_phrase).unwrap(),
                 }
-            },
+            }
             0x1d => {
-                let error_code = match rand_u64(2) {
+                let error_code = match rand(2) {
                     0 => {
-                        let temp = rand_u64(0x00EF); 
+                        let temp = rand(0x00EF) as u16;
                         if temp >= 0xEF {
-                            temp + 0x0110 
+                            temp + 0x0110
                         } else {
                             temp + 0x11
                         }
                     }
-                    1 => 0x0200 + rand_u64((u64::MAX - 0x0200).into()),  
+                    1 => 0x0200 + rand((u64::MAX - 0x0200).into()) as u16,
                     _ => unreachable!(),
                 };
                 let reason_phrase_length = VarInt::new_u32(rand(1948) as u32);
@@ -1049,19 +1169,19 @@ pub(crate) mod test_frame {
                     reason_phrase.push(valid_char);
                 }
                 Frame::ConnectionClose {
-                    error_code: VarInt::new_u64(error_code).unwrap(),
+                    error_code: VarInt::new_u64(error_code as u64).unwrap(),
                     frame_type: None,
                     reason_phrase_length,
                     reason_phrase: String::from_utf8(reason_phrase).unwrap(),
                 }
-            },
+            }
             0x1e => Frame::HandshakeDone,
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
     #[test]
-    fn test_frame() {        
+    fn test_frame() {
         let num_frames = 1_000_000;
         for i in 0..num_frames {
             println!("frame test: {}", i);

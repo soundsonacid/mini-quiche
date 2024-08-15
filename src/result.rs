@@ -13,6 +13,18 @@ impl fmt::Display for QuicheError {
     }
 }
 
+impl From<std::io::Error> for QuicheError {
+    fn from(err: std::io::Error) -> Self {
+        QuicheError(err.to_string())
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for QuicheError {
+    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        QuicheError(err.to_string())
+    }
+}
+
 pub fn require(cond: bool, msg: &str) -> QuicheResult<()> {
     if !cond {
         return Err(QuicheError(msg.to_string()));

@@ -1,7 +1,7 @@
 pub mod bits;
-pub mod varint;
 pub mod rand;
+pub mod varint;
 
 pub use bits::*;
-pub use varint::*;
 pub use rand::*;
+pub use varint::*;

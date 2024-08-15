@@ -80,9 +80,7 @@ impl LongHeaderExtension {
         match ty {
             0 => {
                 let token_length = VarInt::decode(bytes)?;
-                let token = bytes
-                    .drain(..token_length.usize())
-                    .collect::<Vec<u8>>();
+                let token = bytes.drain(..token_length.usize()).collect::<Vec<u8>>();
                 let length = VarInt::decode(bytes)?;
                 let packet_number = PacketNumber(VarInt::decode(bytes)?);
                 Ok(LongHeaderExtension::Initial {
@@ -199,7 +197,6 @@ impl LongHeader {
     // testing only. this is definitely bad practice.
     #[allow(dead_code)]
     pub(crate) fn ty(&self) -> u8 {
-        dbg!(format!("{:08b}", self.long_packet_type.to_inner()));
         self.long_packet_type.to_inner()
     }
 
@@ -207,30 +204,11 @@ impl LongHeader {
     #[allow(dead_code)]
     pub(crate) fn rem_len(&self) -> usize {
         match &self.extension {
-            LongHeaderExtension::Initial {
-                length,
-                ..
-            } 
-            | LongHeaderExtension::ZeroRTT {
-                length,
-                ..
-            }
-            | LongHeaderExtension::Handshake {
-                length,
-                ..
-            } => {
-                length.usize()
-            },
-            LongHeaderExtension::Retry {
-                ..
-            } => {
-                0
-            },
-            LongHeaderExtension::VersionNegotiation {
-                ..
-            } => {
-                0
-            },
+            LongHeaderExtension::Initial { length, .. }
+            | LongHeaderExtension::ZeroRTT { length, .. }
+            | LongHeaderExtension::Handshake { length, .. } => length.usize(),
+            LongHeaderExtension::Retry { .. } => 0,
+            LongHeaderExtension::VersionNegotiation { .. } => 0,
         }
     }
 
@@ -367,8 +345,6 @@ impl LongHeader {
             3 => Header::Retry,
             _ => Header::Long,
         };
-
-        dbg!(bytes.clone());
 
         require(
             bytes.is_empty(),
@@ -620,7 +596,6 @@ pub(crate) mod test_header {
 
     pub fn generate_random_long_header() -> Header {
         let header_type = rand(4);
-        println!("gen ht: {:?}", header_type);
         let header_enum_gen = vec![
             Header::Initial,
             Header::Retry,
@@ -649,8 +624,6 @@ pub(crate) mod test_header {
             _ => SingleBit::one(),
         };
 
-        println!("gen ty: {:?}", long_packet_type.to_inner());
-        println!("gen fb: {:?}", fixed_bit.to_inner());
         let extension = match long_packet_type.to_inner() {
             0 => match fixed_bit.to_inner() {
                 0 => LongHeaderExtension::VersionNegotiation {
@@ -661,12 +634,15 @@ pub(crate) mod test_header {
                         rand(32).into(),
                     ],
                 },
-                1 => LongHeaderExtension::Initial {
-                    token_length: VarInt::new_u32(rand(2).into()),
-                    token: vec![rand(256); rand(20) as usize],
-                    length: VarInt::new_u32(rand(39) as u32 + 1),
-                    packet_number: PacketNumber(VarInt::new_u32(rand(32) as u32)),
-                },
+                1 => {
+                    let token_length = VarInt::new_u32(rand(39) as u32 + 1);
+                    LongHeaderExtension::Initial {
+                        token_length,
+                        token: vec![rand(256); token_length.usize()],
+                        length: VarInt::new_u32(rand(39) as u32 + 1),
+                        packet_number: PacketNumber(VarInt::new_u32(rand(32) as u32)),
+                    }
+                }
                 _ => unreachable!("fixed_bit should be 0 or 1"),
             },
             1 => LongHeaderExtension::ZeroRTT {

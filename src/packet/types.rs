@@ -1,5 +1,5 @@
 use crate::bits::{Bits, BitsExt};
-use crate::{bits_ext, VarInt};
+use crate::{bits_ext, rand, VarInt};
 
 // unfortunately it's really annoying to implement a 160 bit integer
 #[derive(PartialEq, Debug, Clone)]
@@ -15,10 +15,22 @@ impl ConnectionId {
     pub fn new(cid_len: u8, cid: Vec<u8>) -> Self {
         Self { cid_len, cid }
     }
+
+    pub fn arbitrary() -> Self {
+        let cid_len = rand(20) + 1;
+        let cid = (0..cid_len).map(|_| rand(255)).collect();
+        Self { cid_len, cid }
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct PacketNumber(pub VarInt);
+
+impl PacketNumber {
+    pub fn size(&self) -> usize {
+        self.0.size()
+    }
+}
 
 bits_ext!(SingleBit, crate::bits::BitsExt<u8>, 1, u8);
 bits_ext!(TwoBits, crate::bits::BitsExt<u8>, 2, u8);

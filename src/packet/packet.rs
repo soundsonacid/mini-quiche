@@ -1,19 +1,61 @@
-use crate::{bits::BitsExt, result::QuicheResult, VarInt};
+use crate::{bits::BitsExt, frame_size, result::QuicheResult, VarInt};
 
 use super::{
-    frame::Frame, header::{Header, LongHeader, LongHeaderExtension, ShortHeader}, ConnectionId, FourBits, HeaderForm, LongPacketType, PacketNumber, SingleBit, TwoBits
+    frame::Frame,
+    header::{Header, LongHeader, LongHeaderExtension, ShortHeader},
+    ConnectionId, FourBits, HeaderForm, LongPacketType, PacketNumber, SingleBit, TwoBits,
 };
+
+use crate::MINI_QUICHE_VERSION;
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct Packet {
     pub header: Header,
-    pub payload: Vec<Frame>, 
+    pub payload: Vec<Frame>,
 }
 
 impl Packet {
     pub fn contains_frames(&self) -> bool {
         // retry and version negotiation packets do not contain frames
         !matches!(self.header, Header::Retry(_) | Header::VersionNegotiate(_))
+    }
+
+    pub fn create_server_hello(
+        client_cid: ConnectionId,
+        server_cid: ConnectionId,
+        crypto: Frame,
+        packet_number: PacketNumber,
+    ) -> Self {
+        Self::initial(
+            MINI_QUICHE_VERSION,
+            client_cid,
+            server_cid,
+            FourBits::from_num(0b00),
+            VarInt::zero(),
+            Vec::default(),
+            VarInt::new_u32((frame_size!(crypto.clone()) + packet_number.size()) as u32),
+            packet_number,
+            vec![crypto],
+        )
+    }
+
+    pub fn create_client_hello(
+        server_cid: ConnectionId,
+        token: Option<Vec<u8>>,
+        crypto: Frame,
+        packet_number: PacketNumber,
+    ) -> Self {
+        Self::initial(
+            MINI_QUICHE_VERSION,
+            server_cid,
+            ConnectionId::arbitrary(),
+            FourBits::from_num(0b00),
+            VarInt::new_u32(token.clone().unwrap_or_default().len() as u32),
+            token.unwrap_or_default(),
+            VarInt::new_u32((frame_size!(crypto.clone()) + packet_number.size()) as u32),
+            packet_number,
+            vec![crypto],
+        )
     }
 
     pub fn initial(
@@ -146,41 +188,36 @@ mod test {
     use super::*;
     use crate::frame_size;
     use crate::macros::FrameType;
-    use crate::packet::frame::STREAM_RANGE;
     // this might be bad practice, but who cares, it's for tests
+    use crate::packet::frame::test_frame::generate_random_frame;
     use crate::packet::header::test_header::{
         generate_random_long_header, generate_random_short_header,
     };
     use crate::rand::rand;
-    use crate::packet::frame::test_frame::generate_random_frame;
 
     // testing only. this is definitely bad practice.
     impl Header {
         pub(crate) fn ty(&self) -> u8 {
             match self {
-                Header::Initial(header) 
+                Header::Initial(header)
                 | Header::Retry(header)
                 | Header::VersionNegotiate(header)
-                | Header::Long(header) => {
-                    header.ty()
-                },
+                | Header::Long(header) => header.ty(),
                 _ => unreachable!(),
             }
         }
 
         pub(crate) fn rem_len(&self) -> usize {
             match self {
-                Header::Initial(header) 
+                Header::Initial(header)
                 | Header::Retry(header)
                 | Header::VersionNegotiate(header)
-                | Header::Long(header) => {
-                    header.rem_len()
-                },
+                | Header::Long(header) => header.rem_len(),
                 _ => unreachable!(),
             }
         }
     }
-    
+
     // testing only. this is definitely bad practice.
     impl Frame {
         pub(crate) fn must_be_last(&self) -> bool {
@@ -203,7 +240,7 @@ mod test {
     // 9. RETIRE_CONNECTION_ID
     // 10. PATH_CHALLENGE
     // 11. PATH_RESPONSE
-    // 12. HANDSHAKE_DONE   
+    // 12. HANDSHAKE_DONE
     const PROHIBITED_LONG_HEADER_FRAMES: [FrameType; 14] = [
         FrameType::STREAM,
         FrameType::MAX_DATA,
@@ -231,12 +268,10 @@ mod test {
         FrameType::PADDING,
         FrameType::CONNECTION_CLOSE_APPLICATION,
         FrameType::ACK,
-        FrameType::ACK_ECN
+        FrameType::ACK_ECN,
     ];
     fn generate_random_long_header_payload(len: usize, header: Header) -> Vec<Frame> {
         let ty = header.ty();
-        println!("rem_len: {}", len);
-        println!("ty: {}", ty);
         let mut curr_size: usize = 0;
         let mut frames = Vec::new();
         while curr_size < len {
@@ -244,7 +279,9 @@ mod test {
             if PROHIBITED_LONG_HEADER_FRAMES.contains(&frame.ty()) {
                 continue;
             }
-            if ty == LongPacketType::initial().to_inner() && !ALLOWED_INITIAL_FRAMES.contains(&frame.ty()) {
+            if ty == LongPacketType::initial().to_inner()
+                && !ALLOWED_INITIAL_FRAMES.contains(&frame.ty())
+            {
                 continue;
             }
             let frame_size = frame_size!(frame.clone());
@@ -266,7 +303,8 @@ mod test {
     // short header packets CANNOT contain:
     // 1. CRYPTO
     // 2. NEW_TOKEN
-    const PROHIBITED_SHORT_HEADER_FRAMES: [FrameType; 2] = [FrameType::CRYPTO, FrameType::NEW_TOKEN];
+    const PROHIBITED_SHORT_HEADER_FRAMES: [FrameType; 2] =
+        [FrameType::CRYPTO, FrameType::NEW_TOKEN];
     fn generate_random_short_header_payload(num_packets: u8) -> Vec<Frame> {
         let mut frames = Vec::new();
         for _ in 0..num_packets {
@@ -296,7 +334,7 @@ mod test {
             vec![Frame::Crypto {
                 offset: VarInt::new_u32(2),
                 crypto_length: VarInt::new_u32(10),
-                crypto_data: vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+                crypto_data: vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
             }],
         );
 
@@ -306,7 +344,7 @@ mod test {
 
         assert_eq!(original_initial_packet, reconstructed_initial_packet);
 
-        let num_packets = 10;
+        let num_packets = 10_000;
         for i in 0..num_packets {
             println!("Testing random long packet {}", i);
             let header = generate_random_long_header();

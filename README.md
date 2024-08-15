@@ -187,3 +187,22 @@ long packet decode works fine, but i'm noticing some really strange behavior!  t
 5:54 pm    
 apparently this behavior is exhibited in several places.  after writing a better rng multiple tests fail.  i have certainly learned my lesson about checking what values are actually going into these tests.    
 
+### 8/15   
+
+8:49 am   
+yesterday i got caught up playing a four hour long game of catan and didn't get to fix this.  i am going to fix it this morning.   
+
+9:44 am   
+all tests passing, very cool.  now `Packet` is mostly complete!  all that's left to do is add error checking on `Frame` and then i should be good to start building on top of it.   
+
+10:34 am    
+fixing this random generation over and over to make it adhere to quic is really annoying honestly.   
+
+11:05 am   
+that was actually not that bad, i was just getting frustrated with the ack / ack_ecn no negative packet numbers thing for a second.  all the other errors were really simple.  now that `Packet` seems to be fully done, i'm gonna plan out next steps.    
+
+4:44 pm   
+ok i did a bunch of ideas around `Connection` but i'm not really anywhere substantial with it.  feeling kinda burnt out on this for the day so going to call it here and try to flesh connection out more tomorrow   
+
+TODO next time:   
+1. flesh out `Connection`   
