@@ -27,6 +27,12 @@ bits_ext!(SevenBits, crate::bits::BitsExt<u8>, 7, u8);
 bits_ext!(LongPacketType, crate::bits::BitsExt<u8>, 2, u8);
 bits_ext!(HeaderForm, crate::bits::BitsExt<u8>, 1, u8);
 
+impl Default for SingleBit {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl LongPacketType {
     #[inline(always)]
     pub fn initial() -> Self {

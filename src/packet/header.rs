@@ -81,7 +81,7 @@ impl LongHeaderExtension {
             0 => {
                 let token_length = VarInt::decode(bytes)?;
                 let token = bytes
-                    .drain(..token_length.to_inner() as usize)
+                    .drain(..token_length.usize())
                     .collect::<Vec<u8>>();
                 let length = VarInt::decode(bytes)?;
                 let packet_number = PacketNumber(VarInt::decode(bytes)?);
@@ -196,6 +196,44 @@ pub struct LongHeader {
 }
 
 impl LongHeader {
+    // testing only. this is definitely bad practice.
+    #[allow(dead_code)]
+    pub(crate) fn ty(&self) -> u8 {
+        dbg!(format!("{:08b}", self.long_packet_type.to_inner()));
+        self.long_packet_type.to_inner()
+    }
+
+    // testing only. this is definitely bad practice.
+    #[allow(dead_code)]
+    pub(crate) fn rem_len(&self) -> usize {
+        match &self.extension {
+            LongHeaderExtension::Initial {
+                length,
+                ..
+            } 
+            | LongHeaderExtension::ZeroRTT {
+                length,
+                ..
+            }
+            | LongHeaderExtension::Handshake {
+                length,
+                ..
+            } => {
+                length.usize()
+            },
+            LongHeaderExtension::Retry {
+                ..
+            } => {
+                0
+            },
+            LongHeaderExtension::VersionNegotiation {
+                ..
+            } => {
+                0
+            },
+        }
+    }
+
     pub fn len(&self) -> QuicheResult<usize> {
         let len = 1 + 4 + 1 + self.dst_cid.cid_len + 1 + self.src_cid.cid_len;
         // TODO: this is horrible why is this check here
@@ -330,6 +368,8 @@ impl LongHeader {
             _ => Header::Long,
         };
 
+        dbg!(bytes.clone());
+
         require(
             bytes.is_empty(),
             "LongHeader::decode: Failed to read all bytes",
@@ -394,13 +434,13 @@ impl LongHeader {
                     // initial
                     1 => {
                         let token_length = VarInt::decode(&mut ext_bytes).unwrap();
-                        ext_bytes.drain(..token_length.to_inner() as usize);
+                        ext_bytes.drain(..token_length.usize());
                         let length = VarInt::decode(&mut ext_bytes).unwrap();
                         let packet_number = VarInt::decode(&mut ext_bytes).unwrap();
                         return token_length.size()
                             + length.size()
                             + packet_number.size()
-                            + token_length.to_inner() as usize;
+                            + token_length.usize();
                     }
                     _ => unreachable!(),
                 }
@@ -524,6 +564,7 @@ impl ShortHeader {
         let dst_cid_data = bytes.drain(..dst_cid_len as usize).collect::<Vec<u8>>();
 
         // +1 because number len is one less than size of number in bytes
+        // this `invert` function is just terrible, i need to get rid of it eventually
         let number = bytes
             .drain(..(number_len.invert().to_inner() as usize + 1))
             .collect::<Vec<u8>>();
@@ -573,25 +614,18 @@ impl ShortHeader {
 }
 
 #[cfg(test)]
-pub mod test_header {
+pub(crate) mod test_header {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    pub fn rand(modulus: u128) -> u8 {
-        (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            % modulus) as u8
-    }
+    use crate::rand::rand;
 
     pub fn generate_random_long_header() -> Header {
         let header_type = rand(4);
+        println!("gen ht: {:?}", header_type);
         let header_enum_gen = vec![
             Header::Initial,
             Header::Retry,
-            Header::VersionNegotiate,
             Header::Long,
+            Header::VersionNegotiate,
         ];
         let header_enum = header_enum_gen[header_type as usize];
 
@@ -606,15 +640,17 @@ pub mod test_header {
                     LongPacketType::handshake()
                 }
             }
-            4 => LongPacketType::zero(), // version negotiate
+            3 => LongPacketType::zero(), // version negotiate
             _ => unreachable!("header_type should be 0, 1, 2, 3"),
         };
 
         let fixed_bit = match header_type {
-            4 => SingleBit::zero(),
+            3 => SingleBit::zero(),
             _ => SingleBit::one(),
         };
 
+        println!("gen ty: {:?}", long_packet_type.to_inner());
+        println!("gen fb: {:?}", fixed_bit.to_inner());
         let extension = match long_packet_type.to_inner() {
             0 => match fixed_bit.to_inner() {
                 0 => LongHeaderExtension::VersionNegotiation {
@@ -628,17 +664,17 @@ pub mod test_header {
                 1 => LongHeaderExtension::Initial {
                     token_length: VarInt::new_u32(rand(2).into()),
                     token: vec![rand(256); rand(20) as usize],
-                    length: VarInt::new_u32(rand(2).into()),
+                    length: VarInt::new_u32(rand(39) as u32 + 1),
                     packet_number: PacketNumber(VarInt::new_u32(rand(32) as u32)),
                 },
                 _ => unreachable!("fixed_bit should be 0 or 1"),
             },
             1 => LongHeaderExtension::ZeroRTT {
-                length: VarInt::new_u32(rand(2).into()),
+                length: VarInt::new_u32(rand(39) as u32 + 1),
                 packet_number: PacketNumber(VarInt::new_u32(rand(32) as u32)),
             },
             2 => LongHeaderExtension::Handshake {
-                length: VarInt::new_u32(rand(2).into()),
+                length: VarInt::new_u32(rand(39) as u32 + 1),
                 packet_number: PacketNumber(VarInt::new_u32(rand(32) as u32)),
             },
             3 => LongHeaderExtension::Retry {
@@ -725,7 +761,7 @@ pub mod test_header {
 
         assert_eq!(original_initial_header, reconstructed_initial_header);
 
-        let num_headers = 100;
+        let num_headers = 1_000;
         for i in 0..num_headers {
             println!("Testing random long header {}", i);
             let original_header = generate_random_long_header();
@@ -754,7 +790,7 @@ pub mod test_header {
 
         assert_eq!(original_one_rtt_header, reconstructed_one_rtt_header);
 
-        let num_headers = 100;
+        let num_headers = 1_000;
         for i in 0..num_headers {
             println!("Testing random short header {}", i);
             let original_header = generate_random_short_header();

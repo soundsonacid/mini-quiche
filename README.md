@@ -101,9 +101,9 @@ extending these headers has proven to be not fun at all.  i ended up taking some
 honestly, probably going to call it here for the night.  i'm still a little sick and my brain is still feeling a little clogged, but that's no excuse.  i'm just having a hard time locking in. gonna go read about probability.  major skill issue.  tomorrow, i will get through headers, frames, packets, and start working on the handshake.  
 
 TODO next time:  
-1. Fix `LongHeader`  ✅  
-2. Finish `Frame`  
-3. Prototype handshake  
+1. Fix `LongHeader`  ✅   
+2. Finish `Frame`    
+3. Prototype handshake    
 
 ### 8/3
 12:12 pm  
@@ -140,5 +140,50 @@ i am just building on a mountain of debt right now, i can feel it.  the amount o
 not super satisfied with the forward progress today (didn't finish `Frame` or start handshake), but i am glad that i got a lot of really nasty bugs solved and out of the way.  
 
 TODO next time:
-1. Finish `Frame`
-2. Prototype handshake
+1. Finish `Frame` ✅    
+2. Prototype handshake   
+
+### 8/14    
+
+11:06 am    
+it has been a while since i worked on this but i am not gonna let it die.  getting `Frame` done today.    
+
+2:38 pm    
+i didn't do much for a couple hours but i just ran through `Frame::decode()` as fast as i could, going to test it now & hopefully it works fine!  i've been pretty lucky with the decodes so i'm hoping that i am lucky with this one too...     
+
+3:14 pm     
+it took forever to write the random `Frame` generation function, but i'm glad i did because i am finding all sorts of code that i wrote that i am having a hard time understanding why i ever wrote it like that LOL.  there's just a lot of weird stuff that was going wrong in `Frame` but nothing so hard that it's irritating really.     
+
+3:38 pm    
+i am having annoying problems with `ConnectionClose` frames.  i think that this is the last bug in `Frame::encode()` / `Frame::decode()` so hopefully i am able to finish it quickly.  i would like to put everything together into packets today...    
+
+3:53 pm    
+total victory against `Frame` has been accomplished.  time to try and put it all together into `Packet`!   
+
+3:54 pm   
+i lied.  as soon as i changed to 1m random `Frame`s i'm back with the same errors.  FUCK.  it seems to be pretty random when it'll break now, way less common.  probably some edge case?   
+
+4:24 pm   
+lol.  it wasn't a problem in the actual logic.  it was a problem in the random generation.  great way to spend an hour.  gonna try to put `Packet` together and then add a bunch of checks and balances on `Frame` to make sure that everything is all good there.   
+
+4:37 pm   
+kinda realizing that the "fuzz" for `Packet` is gonna be really annoying.  seems like i've been spending more time writing and debugging the random testing generation than the actual code.  i guess that's the unsexy, boring work that makes up most of the job though.  the best developer i ever worked with once told me that the rigorous, annoying, boring testing is what really makes you good.  
+
+4:53 pm    
+ok, it seems like 10,000 short header packets went pretty smoothly... which i'm a _little_ wary of, but i also feel like there's a good chance i could have just done my job properly here and it actually does work.  we will find out later i guess.    
+
+5:05 pm  
+i have found out.  it was not my programming acumen.  i was doing something wrong.  time to fix it!  
+
+5:13 pm  
+short header packets are just an issue with stream frames, so hopefully i can make short work of it.  i estimate long header packets will be slightly more difficult, but maybe not.  the testing for this project is getting to the "total slop" point of things which kinda sucks, i'd really like to get the testing a little cleaner.  maybe that will be next time's goal before anything else, just make the testing framework not so messy and bloated.   
+
+5:19 pm   
+ok that wasn't bad.  i was just wrongfully inserting frames after a stream frame that should occupy the rest of the packet.  easy fix.  
+
+5:41 pm   
+long packet decode works fine, but i'm noticing some really strange behavior!  the long packet type is continually coming out always as initial, which obviously is not ideal for testing coverage... i'll have to dig a little deeper to figure out why that's happening.   
+
+5:54 pm    
+apparently this behavior is exhibited in several places.  after writing a better rng multiple tests fail.  i have certainly learned my lesson about checking what values are actually going into these tests.    
+

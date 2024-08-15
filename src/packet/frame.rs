@@ -1,6 +1,13 @@
-use crate::{frame, VarInt};
+use std::ops::RangeInclusive;
 
-use super::ConnectionId;
+use crate::{frame, packet::error::ProtocolError, result::QuicheResult, BitsExt, VarInt};
+
+use super::{ConnectionId, SingleBit};
+
+const STREAM_FIN: u8 = 0x01;
+const STREAM_LEN: u8 = 0x02;
+const STREAM_OFF: u8 = 0x04;
+pub const STREAM_RANGE: RangeInclusive<FrameType> = FrameType(0x08)..=FrameType(0x0f);
 
 // frame architecture is inspired by quinn
 
@@ -198,8 +205,11 @@ frame! {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
+    // 0x00
     Padding,
+    // 0x01
     Ping,
+    // 0x02
     Ack {
         largest_acknowledged: VarInt,
         ack_delay: VarInt,
@@ -207,6 +217,7 @@ pub enum Frame {
         first_ack_range: VarInt,
         ack_ranges: Vec<(VarInt, VarInt)>,
     },
+    // 0x03
     AckEcn {
         largest_acknowledged: VarInt,
         ack_delay: VarInt,
@@ -217,64 +228,82 @@ pub enum Frame {
         ect1_count: VarInt,
         ecn_ce_count: VarInt,
     },
+    // 0x04
     ResetStream {
         stream_id: VarInt,
         application_protocol_error_code: VarInt,
         final_size: VarInt,
     },
+    // 0x05
     StopSending {
         stream_id: VarInt,
         application_protocol_error_code: VarInt,
     },
+    // 0x06
     Crypto {
         offset: VarInt,
         crypto_length: VarInt,
         crypto_data: Vec<u8>,
     },
+    // 0x07
     NewToken {
         token_length: VarInt,
         token: Vec<u8>,
     },
+    // 0x08 - 0x0f
     Stream {
         stream_id: VarInt,
         offset: VarInt,
         length: VarInt,
-        fin: bool,
+        fin: SingleBit,
+        // if length is not present this extends to the end of the packet
         stream_data: Vec<u8>,
     },
+    // 0x10
     MaxData(VarInt),
+    // 0x11
     MaxStreamData {
         stream_id: VarInt,
         max_stream_data: VarInt,
     },
+    // 0x12 (bidi), 0x13 (uni)
     MaxStreams {
         stream_type: StreamType,
         max_streams: VarInt,
     },
+    // 0x14
     DataBlocked(VarInt),
+    // 0x15
     StreamDataBlocked {
         stream_id: VarInt,
         stream_data_limit: VarInt,
     },
+    // 0x16 (bidi), 0x17 (uni)
     StreamsBlocked {
         stream_type: StreamType,
         max_streams: VarInt,
     },
+    // 0x18
     NewConnectionId {
         sequence_number: VarInt,
         retire_prior_to: VarInt,
         connection_id: ConnectionId,
         stateless_reset_token: [u8; 16],
     },
+    // 0x19
     RetireConnectionId(VarInt),
+    // 0x1a
     PathChallenge([u8; 8]),
+    // 0x1b
     PathResponse([u8; 8]),
+    // 0x1c (protocol), 0x1d (application)
     ConnectionClose {
         error_code: VarInt,
-        frame_type: Option<u64>,
+        frame_type: Option<u8>,
         reason_phrase_length: VarInt,
         reason_phrase: String,
     },
+    // 0x1e
     HandshakeDone,
 }
 
@@ -285,7 +314,7 @@ pub enum StreamType {
 }
 
 impl Frame {
-    fn ty(&self) -> FrameType {
+    pub(crate) fn ty(&self) -> FrameType {
         use self::Frame::*;
         match *self {
             Padding => FrameType::PADDING,
@@ -303,13 +332,13 @@ impl Frame {
                 ..
             } => {
                 let mut ty = FrameType::STREAM.0;
-                if *fin {
+                if fin.to_inner() == 1 {
                     ty |= 0x01;
                 }
                 if length.to_inner() > 0 {
                     ty |= 0x02;
                 }
-                if offset.to_inner() > 0 {
+                if offset.to_inner() == 1 {
                     ty |= 0x04;
                 }
                 FrameType(ty)
@@ -330,11 +359,13 @@ impl Frame {
             RetireConnectionId(_) => FrameType::RETIRE_CONNECTION_ID,
             PathChallenge(_) => FrameType::PATH_CHALLENGE,
             PathResponse(_) => FrameType::PATH_RESPONSE,
-            ConnectionClose { error_code, .. } => match error_code.to_inner() {
-                0x1c => FrameType::CONNECTION_CLOSE_TRANSPORT,
-                0x1d => FrameType::CONNECTION_CLOSE_APPLICATION,
-                _ => unreachable!(),
-            },
+            ConnectionClose { error_code, .. } => {
+                if ProtocolError::is_protocol_error(error_code.to_inner()) {
+                    FrameType::CONNECTION_CLOSE_TRANSPORT
+                } else {
+                    FrameType::CONNECTION_CLOSE_APPLICATION
+                }
+            }
             HandshakeDone => FrameType::HANDSHAKE_DONE,
         }
     }
@@ -419,17 +450,17 @@ impl Frame {
                 stream_id,
                 offset,
                 length,
-                fin,
+                ref fin,
                 ref stream_data,
             } => {
                 let mut ty = 0;
-                if fin {
+                if fin.to_inner() == 1 {
                     ty |= 0x01;
                 }
                 if length.to_inner() > 0 {
                     ty |= 0x02;
                 }
-                if offset.to_inner() > 0 {
+                if offset.to_inner() == 1 {
                     ty |= 0x04;
                 }
                 buf.push(ty);
@@ -453,13 +484,9 @@ impl Frame {
                 buf.extend(max_stream_data.encode());
             }
             MaxStreams {
-                stream_type,
                 max_streams,
+                ..
             } => {
-                buf.push(match stream_type {
-                    StreamType::Bidirectional => 0,
-                    StreamType::Unidirectional => 1,
-                });
                 buf.extend(max_streams.encode());
             }
             DataBlocked(maximum_data) => {
@@ -473,13 +500,9 @@ impl Frame {
                 buf.extend(stream_data_limit.encode());
             }
             StreamsBlocked {
-                stream_type,
                 max_streams,
+                ..
             } => {
-                buf.push(match stream_type {
-                    StreamType::Bidirectional => 0,
-                    StreamType::Unidirectional => 1,
-                });
                 buf.extend(max_streams.encode());
             }
             NewConnectionId {
@@ -511,7 +534,7 @@ impl Frame {
             } => {
                 buf.extend(error_code.encode());
                 if let Some(frame_type) = frame_type {
-                    buf.push(frame_type as u8);
+                    buf.push(frame_type);
                 }
                 buf.extend(reason_phrase_length.encode());
                 buf.extend(reason_phrase.as_bytes());
@@ -521,29 +544,531 @@ impl Frame {
         buf
     }
 
-    pub fn decode(_bytes: &mut Vec<u8>) -> Frame {
-        unimplemented!()
+    pub fn decode(bytes: &mut Vec<u8>) -> QuicheResult<Frame> {
+        let ty = FrameType(bytes.remove(0));
+        match ty {
+            FrameType::PADDING => Ok(Frame::Padding {}),
+            FrameType::PING => Ok(Frame::Ping {}),
+            FrameType::HANDSHAKE_DONE => Ok(Frame::HandshakeDone {}),
+            FrameType::ACK => {
+                let largest_acknowledged = VarInt::decode(bytes)?;
+                let ack_delay = VarInt::decode(bytes)?;
+                let ack_range_count = VarInt::decode(bytes)?;
+                let first_ack_range = VarInt::decode(bytes)?;
+                let mut ack_ranges: Vec<(VarInt, VarInt)> = Vec::with_capacity(ack_range_count.usize());
+                for _ in 0..ack_range_count.to_inner() {
+                    let gap = VarInt::decode(bytes)?;
+                    let ack_range_length = VarInt::decode(bytes)?;
+                    ack_ranges.push((gap, ack_range_length));
+                }
+                Ok(Frame::Ack {
+                    largest_acknowledged,
+                    ack_delay,
+                    ack_range_count,
+                    first_ack_range,
+                    ack_ranges,
+                })
+            },
+            FrameType::ACK_ECN => {
+                let largest_acknowledged = VarInt::decode(bytes)?;
+                let ack_delay = VarInt::decode(bytes)?;
+                let ack_range_count = VarInt::decode(bytes)?;
+                let first_ack_range = VarInt::decode(bytes)?;
+                let mut ack_ranges: Vec<(VarInt, VarInt)> = Vec::with_capacity(ack_range_count.usize());
+                for _ in 0..ack_range_count.to_inner() {
+                    let gap = VarInt::decode(bytes)?;
+                    let ack_range_length = VarInt::decode(bytes)?;
+                    ack_ranges.push((gap, ack_range_length));
+                }
+                let ect0_count = VarInt::decode(bytes)?;
+                let ect1_count = VarInt::decode(bytes)?;
+                let ecn_ce_count = VarInt::decode(bytes)?;
+                Ok(Frame::AckEcn {
+                    largest_acknowledged,
+                    ack_delay,
+                    ack_range_count,
+                    first_ack_range,
+                    ack_ranges,
+                    ect0_count,
+                    ect1_count,
+                    ecn_ce_count,
+                })
+            },
+            FrameType::RESET_STREAM => {
+                let stream_id = VarInt::decode(bytes)?;
+                let application_protocol_error_code = VarInt::decode(bytes)?;
+                let final_size = VarInt::decode(bytes)?;
+                Ok(Frame::ResetStream {
+                    stream_id,
+                    application_protocol_error_code,
+                    final_size,
+                })
+            },
+            FrameType::STOP_SENDING => {
+                let stream_id = VarInt::decode(bytes)?;
+                let application_protocol_error_code = VarInt::decode(bytes)?;
+                Ok(Frame::StopSending {
+                    stream_id,
+                    application_protocol_error_code,
+                })
+            },
+            FrameType::CRYPTO => {
+                let offset = VarInt::decode(bytes)?;
+                let crypto_length = VarInt::decode(bytes)?;
+                let crypto_data = bytes.drain(..crypto_length.usize()).collect();
+                Ok(Frame::Crypto {
+                    offset,
+                    crypto_length,
+                    crypto_data,
+                })
+            },
+            FrameType::NEW_TOKEN => {
+                let token_length = VarInt::decode(bytes)?;
+                let token = bytes.drain(..token_length.usize()).collect();
+                Ok(Frame::NewToken {
+                    token_length,
+                    token,
+                })
+            },
+            ty if STREAM_RANGE.contains(&ty) => {
+                let stream_ty = bytes.remove(0);
+                let stream_id = VarInt::decode(bytes)?;
+
+                let mut offset: Option<VarInt> = None;
+                let mut length: Option<VarInt> = None;
+                let mut fin = SingleBit::zero();
+
+                if (stream_ty & STREAM_FIN) != 0 {
+                    fin = SingleBit::one();
+                }
+
+                if (stream_ty & STREAM_LEN) != 0 {
+                    length = Some(VarInt::decode(bytes)?);
+                }
+
+                if (stream_ty & STREAM_OFF) != 0 {
+                    offset = Some(VarInt::decode(bytes)?);
+                }
+
+                let stream_data = if let Some(len) = length {
+                    bytes.drain(..len.usize()).collect()
+                } else {
+                    bytes.drain(..).collect()
+                };
+                
+                Ok(Frame::Stream {
+                    stream_id,
+                    offset: offset.unwrap_or_default(),
+                    length: length.unwrap_or_default(),
+                    fin,
+                    stream_data,
+                })
+            },
+            FrameType::MAX_DATA => {
+                let maximum_data = VarInt::decode(bytes)?;
+                Ok(Frame::MaxData(maximum_data))
+            },
+            FrameType::MAX_STREAM_DATA => {
+                let stream_id = VarInt::decode(bytes)?;
+                let max_stream_data = VarInt::decode(bytes)?;
+                Ok(Frame::MaxStreamData {
+                    stream_id,
+                    max_stream_data,
+                })
+            },
+            FrameType::MAX_STREAMS_BIDI => {
+                let max_streams = VarInt::decode(bytes)?;
+                Ok(Frame::MaxStreams {
+                    stream_type: StreamType::Bidirectional,
+                    max_streams,
+                })
+            },
+            FrameType::MAX_STREAMS_UNI => {
+                let max_streams = VarInt::decode(bytes)?;
+                Ok(Frame::MaxStreams {
+                    stream_type: StreamType::Unidirectional,
+                    max_streams,
+                })
+            },
+            FrameType::DATA_BLOCKED => {
+                let maximum_data = VarInt::decode(bytes)?;
+                Ok(Frame::DataBlocked(maximum_data))
+            },
+            FrameType::STREAM_DATA_BLOCKED => {
+                let stream_id = VarInt::decode(bytes)?;
+                let stream_data_limit = VarInt::decode(bytes)?;
+                Ok(Frame::StreamDataBlocked {
+                    stream_id,
+                    stream_data_limit,
+                })
+            },
+            FrameType::STREAMS_BLOCKED_BIDI => {
+                let max_streams = VarInt::decode(bytes)?;
+                Ok(Frame::StreamsBlocked {
+                    stream_type: StreamType::Bidirectional,
+                    max_streams,
+                })
+            },
+            FrameType::STREAMS_BLOCKED_UNI => {
+                let max_streams = VarInt::decode(bytes)?;
+                Ok(Frame::StreamsBlocked {
+                    stream_type: StreamType::Unidirectional,
+                    max_streams,
+                })
+            },
+            FrameType::NEW_CONNECTION_ID => {
+                let sequence_number = VarInt::decode(bytes)?;
+                let retire_prior_to = VarInt::decode(bytes)?;
+                let cid_len = bytes.remove(0);
+                let cid = bytes.drain(..cid_len as usize).collect();
+                let stateless_reset_token = bytes.drain(..16).collect::<Vec<u8>>();
+                Ok(Frame::NewConnectionId {
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id: ConnectionId { cid_len, cid },
+                    stateless_reset_token: stateless_reset_token.try_into().unwrap(),
+                })
+            },
+            FrameType::RETIRE_CONNECTION_ID => {
+                let sequence_number = VarInt::decode(bytes)?;
+                Ok(Frame::RetireConnectionId(sequence_number))
+            },
+            FrameType::PATH_CHALLENGE => {
+                let challenge = bytes.drain(..8).collect::<Vec<u8>>();
+                Ok(Frame::PathChallenge(challenge.try_into().unwrap()))
+            },
+            FrameType::PATH_RESPONSE => {
+                let response = bytes.drain(..8).collect::<Vec<u8>>();
+                Ok(Frame::PathResponse(response.try_into().unwrap()))
+            },
+            FrameType::CONNECTION_CLOSE_TRANSPORT => {
+                let error_code = VarInt::decode(bytes)?;
+                let frame_type = bytes.remove(0);
+                let reason_phrase_length = VarInt::decode(bytes)?;
+                let reason_phrase_bytes = bytes.drain(..reason_phrase_length.usize()).collect();
+                let reason_phrase = String::from_utf8(reason_phrase_bytes).unwrap();
+                Ok(Frame::ConnectionClose {
+                    error_code,
+                    frame_type: Some(frame_type),
+                    reason_phrase_length,
+                    reason_phrase,
+                })
+            },
+            FrameType::CONNECTION_CLOSE_APPLICATION => {
+                let error_code = VarInt::decode(bytes)?;
+                let reason_phrase_length = VarInt::decode(bytes)?;
+                let reason_phrase_bytes = bytes.drain(..reason_phrase_length.usize()).collect();
+                let reason_phrase = String::from_utf8(reason_phrase_bytes).unwrap();
+                Ok(Frame::ConnectionClose {
+                    error_code,
+                    frame_type: None,
+                    reason_phrase_length,
+                    reason_phrase,
+                })
+            },
+            _ => unreachable!()
+        }
     }
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test_frame {
     use super::*;
+    use crate::rand::rand;
     // use crate::packet::header::test_header::rand;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn generate_random_frame() -> Frame {
-        unimplemented!()
+    pub fn rand_u64(modulus: u128) -> u64 {
+        (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            % modulus) as u64
+    }
+
+    pub fn generate_random_frame() -> Frame {
+        let ty = rand(31);
+        match ty {
+            0x00 => Frame::Padding,
+            0x01 => Frame::Ping,
+            0x02 => { 
+                let largest_acknowledged = VarInt::new_u32(rand(9) as u32);
+                let ack_delay = VarInt::new_u32(7);
+                let ack_range_count = VarInt::new_u32(4);
+                let first_ack_range = VarInt::new_u32(0);
+                let ack_ranges = (0..ack_range_count.to_inner()).map(|_| {
+                    let gap = VarInt::new_u32(rand(9) as u32);
+                    let ack_range_length = VarInt::new_u32(rand(9) as u32);
+                    (gap, ack_range_length)
+                }).collect();
+                Frame::Ack {
+                    largest_acknowledged,
+                    ack_delay,
+                    ack_range_count,
+                    first_ack_range,
+                    ack_ranges,
+                }
+            },
+            0x03 => {
+                let largest_acknowledged = VarInt::new_u32(rand(9) as u32);
+                let ack_delay = VarInt::new_u32(7);
+                let ack_range_count = VarInt::new_u32(4);
+                let first_ack_range = VarInt::new_u32(0);
+                let ect0_count = VarInt::new_u32(7);
+                let ect1_count = VarInt::new_u32(7);
+                let ecn_ce_count = VarInt::new_u32(7);
+                let ack_ranges = (0..ack_range_count.to_inner()).map(|_| {
+                    let gap = VarInt::new_u32(rand(9) as u32);
+                    let ack_range_length = VarInt::new_u32(rand(9) as u32);
+                    (gap, ack_range_length)
+                }).collect();
+                Frame::AckEcn {
+                    largest_acknowledged,
+                    ack_delay,
+                    ack_range_count,
+                    first_ack_range,
+                    ack_ranges,
+                    ect0_count,
+                    ect1_count,
+                    ecn_ce_count,
+                }
+            }
+            0x04 => {
+                let stream_id = VarInt::new_u32(rand(255) as u32);
+                let application_protocol_error_code = VarInt::new_u32(rand(255) as u32);
+                let final_size = VarInt::new_u32(rand(255) as u32);
+                Frame::ResetStream {
+                    stream_id,
+                    application_protocol_error_code,
+                    final_size,
+                }
+            },
+            0x05 => {
+                let stream_id = VarInt::new_u32(rand(255) as u32);
+                let application_protocol_error_code = VarInt::new_u32(rand(255) as u32);
+                Frame::StopSending {
+                    stream_id,
+                    application_protocol_error_code,
+                }
+            },
+            0x06 => {
+                let offset = VarInt::new_u32(rand(255) as u32);
+                let crypto_length = VarInt::new_u32(65);
+                let mut crypto_data = Vec::with_capacity(crypto_length.usize());
+                for _ in 0..crypto_length.to_inner() {
+                    crypto_data.push(rand(255) as u8);
+                }
+                Frame::Crypto {
+                    offset,
+                    crypto_length,
+                    crypto_data,
+                }
+            },
+            0x07 => {
+                let token_length = VarInt::new_u32(65);
+                let mut token = Vec::with_capacity(token_length.usize());
+                for _ in 0..token_length.to_inner() {
+                    token.push(rand(255) as u8);
+                }
+                Frame::NewToken {
+                    token_length,
+                    token,
+                }
+            },
+            stream_ty @ 0x08
+            | stream_ty @ 0x09
+            | stream_ty @ 0x0a 
+            | stream_ty @ 0x0b
+            | stream_ty @ 0x0c
+            | stream_ty @ 0x0d
+            | stream_ty @ 0x0e
+            | stream_ty @ 0x0f => {
+                let stream_id = VarInt::new_u32(rand(1_000_000) as u32); // Random stream_id
+                let offset = if (stream_ty & 0x04) != 0 {
+                    VarInt::new_u32(rand(1_000) as u32)
+                } else {
+                    VarInt::default()
+                };
+            
+                let length = if (stream_ty & 0x02) != 0 {
+                    VarInt::new_u32(rand(1024) as u32)
+                } else {
+                    VarInt::default()
+                };
+            
+                let fin = if (stream_ty & 0x01) != 0 {
+                    SingleBit::one()
+                } else {
+                    SingleBit::zero()
+                };
+            
+                let stream_data = if length.0 > 0 {
+                    (0..length.0).map(|_| rand(256) as u8).collect()
+                } else {
+                    vec![rand(256) as u8; 64]
+                };
+            
+                Frame::Stream {
+                    stream_id,
+                    offset,
+                    length,
+                    fin,
+                    stream_data,
+                }
+            },
+            0x10 => {
+                let maximum_data = VarInt::new_u32(rand(255) as u32);
+                Frame::MaxData(maximum_data)
+            },
+            0x11 => {
+                let stream_id = VarInt::new_u32(rand(255) as u32);
+                let max_stream_data = VarInt::new_u32(rand(255) as u32);
+                Frame::MaxStreamData {
+                    stream_id,
+                    max_stream_data,
+                }
+            },
+            0x12 => {
+                let stream_type = StreamType::Bidirectional;
+                let max_streams = VarInt::new_u32(rand(255) as u32);
+                Frame::MaxStreams {
+                    stream_type,
+                    max_streams,
+                }
+            },
+            0x13 => {
+                let stream_type = StreamType::Unidirectional;
+                let max_streams = VarInt::new_u32(rand(255) as u32);
+                Frame::MaxStreams {
+                    stream_type,
+                    max_streams,
+                }
+            },
+            0x14 => {
+                let maximum_data = VarInt::new_u32(rand(255) as u32);
+                Frame::DataBlocked(maximum_data)
+            },
+            0x15 => {
+                let stream_id = VarInt::new_u32(rand(255) as u32);
+                let stream_data_limit = VarInt::new_u32(rand(255) as u32);
+                Frame::StreamDataBlocked {
+                    stream_id,
+                    stream_data_limit,
+                }
+            },
+            0x16 => {
+                let stream_type = StreamType::Bidirectional;
+                let max_streams = VarInt::new_u32(rand(255) as u32);
+                Frame::StreamsBlocked {
+                    stream_type,
+                    max_streams,
+                }
+            },
+            0x17 => {
+                let stream_type = StreamType::Unidirectional;
+                let max_streams = VarInt::new_u32(rand(255) as u32);
+                Frame::StreamsBlocked {
+                    stream_type,
+                    max_streams,
+                }
+            },
+            0x18 => {
+                let sequence_number = VarInt::new_u32(rand(255) as u32);
+                let retire_prior_to = VarInt::new_u32(rand(255) as u32);
+                let cid_len = rand(20) as u8;
+                let mut cid = Vec::with_capacity(cid_len as usize);
+                for _ in 0..cid_len {
+                    cid.push(rand(255) as u8);
+                }
+                let mut stateless_reset_token = [0; 16];
+                for i in 0..16 {
+                    stateless_reset_token[i] = rand(255) as u8;
+                }
+                Frame::NewConnectionId {
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id: ConnectionId { cid_len, cid },
+                    stateless_reset_token,
+                }
+            },
+            0x19 => {
+                let sequence_number = VarInt::new_u32(rand(255) as u32);
+                Frame::RetireConnectionId(sequence_number)
+            },
+            0x1a => {
+                let mut challenge = [0; 8];
+                for i in 0..8 {
+                    challenge[i] = rand(255) as u8;
+                }
+                Frame::PathChallenge(challenge)
+            },
+            0x1b => {
+                let mut response = [0; 8];
+                for i in 0..8 {
+                    response[i] = rand(255) as u8;
+                }
+                Frame::PathResponse(response)
+            },
+            0x1c => {
+                let error_code = match rand_u64(2) {
+                    0 => rand_u64(0x11),               
+                    1 => 0x0100 + rand_u64(0x0100),     
+                    _ => unreachable!(),
+                };                
+                let frame_type = rand(31);
+                let reason_phrase_length = VarInt::new_u32(rand(1948) as u32);
+                let mut reason_phrase = Vec::with_capacity(reason_phrase_length.usize());
+                for _ in 0..reason_phrase_length.to_inner() {
+                    let valid_char = rand(95) as u8 + 32;
+                    reason_phrase.push(valid_char);
+                }
+                Frame::ConnectionClose {
+                    error_code: VarInt::new_u64(error_code).unwrap(),
+                    frame_type: Some(frame_type),
+                    reason_phrase_length,
+                    reason_phrase: String::from_utf8(reason_phrase).unwrap(),
+                }
+            },
+            0x1d => {
+                let error_code = match rand_u64(2) {
+                    0 => {
+                        let temp = rand_u64(0x00EF); 
+                        if temp >= 0xEF {
+                            temp + 0x0110 
+                        } else {
+                            temp + 0x11
+                        }
+                    }
+                    1 => 0x0200 + rand_u64((u64::MAX - 0x0200).into()),  
+                    _ => unreachable!(),
+                };
+                let reason_phrase_length = VarInt::new_u32(rand(1948) as u32);
+                let mut reason_phrase = Vec::with_capacity(reason_phrase_length.usize());
+                for _ in 0..reason_phrase_length.to_inner() {
+                    let valid_char = rand(95) as u8 + 32;
+                    reason_phrase.push(valid_char);
+                }
+                Frame::ConnectionClose {
+                    error_code: VarInt::new_u64(error_code).unwrap(),
+                    frame_type: None,
+                    reason_phrase_length,
+                    reason_phrase: String::from_utf8(reason_phrase).unwrap(),
+                }
+            },
+            0x1e => Frame::HandshakeDone,
+            _ => unreachable!()
+        }
     }
 
     #[test]
-    fn test_frame() {
-        let num_frames = 1_000;
+    fn test_frame() {        
+        let num_frames = 1_000_000;
         for i in 0..num_frames {
             println!("frame test: {}", i);
             let frame = generate_random_frame();
             let encoded = frame.encode();
-            let decoded = Frame::decode(&mut encoded.clone());
-            assert_eq!(frame, decoded);
+            let decoded = Frame::decode(&mut encoded.clone()).unwrap();
+            assert_eq!(frame, decoded, "frame ty: {}", frame.ty().to_inner());
         }
     }
 }

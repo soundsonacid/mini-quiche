@@ -1,14 +1,13 @@
 use crate::{bits::BitsExt, result::QuicheResult, VarInt};
 
 use super::{
-    header::{Header, LongHeader, LongHeaderExtension, ShortHeader},
-    ConnectionId, FourBits, HeaderForm, LongPacketType, PacketNumber, SingleBit, TwoBits,
+    frame::Frame, header::{Header, LongHeader, LongHeaderExtension, ShortHeader}, ConnectionId, FourBits, HeaderForm, LongPacketType, PacketNumber, SingleBit, TwoBits
 };
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct Packet {
     pub header: Header,
-    pub payload: Vec<u8>, // TODO: change to Vec<Frame>
+    pub payload: Vec<Frame>, 
 }
 
 impl Packet {
@@ -26,7 +25,7 @@ impl Packet {
         token: Vec<u8>,
         length: VarInt,
         packet_number: PacketNumber,
-        payload: Vec<u8>,
+        payload: Vec<Frame>,
     ) -> Self {
         let header = Header::Initial(LongHeader::initial(
             version_id,
@@ -48,7 +47,7 @@ impl Packet {
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         extension: LongHeaderExtension,
-        payload: Vec<u8>,
+        payload: Vec<Frame>,
     ) -> Self {
         let header = Header::Long(LongHeader::new(
             long_packet_type,
@@ -68,7 +67,7 @@ impl Packet {
         number_len: TwoBits,
         dst_cid: ConnectionId,
         number: Vec<u8>,
-        payload: Vec<u8>,
+        payload: Vec<Frame>,
     ) -> Self {
         let header = Header::Short(ShortHeader::new(
             spin_bit,
@@ -83,7 +82,7 @@ impl Packet {
 
     pub fn encode(&self) -> QuicheResult<Vec<u8>> {
         let mut encoded = self.header.encode()?;
-        encoded.extend(self.payload.iter());
+        encoded.extend(self.payload.iter().map(|frame| frame.encode()).flatten());
         Ok(encoded)
     }
 
@@ -106,9 +105,14 @@ impl Packet {
         // drains everything except payload
         let decoded_header = LongHeader::decode(&mut header_bytes)?;
 
+        let mut frames = Vec::new();
+        while !bytes.is_empty() {
+            let frame = Frame::decode(bytes)?;
+            frames.push(frame);
+        }
         Ok(Self {
             header: decoded_header,
-            payload: bytes.clone(),
+            payload: frames,
         })
     }
 
@@ -123,9 +127,14 @@ impl Packet {
         // drains everything except payload
         let decoded_header = ShortHeader::decode(&mut header_bytes)?;
 
+        let mut frames = Vec::new();
+        while !bytes.is_empty() {
+            let frame = Frame::decode(bytes)?;
+            frames.push(frame);
+        }
         Ok(Self {
             header: decoded_header,
-            payload: bytes.clone(),
+            payload: frames,
         })
     }
 }
@@ -135,14 +144,142 @@ mod test {
     use std::vec;
 
     use super::*;
+    use crate::frame_size;
+    use crate::macros::FrameType;
+    use crate::packet::frame::STREAM_RANGE;
     // this might be bad practice, but who cares, it's for tests
     use crate::packet::header::test_header::{
-        generate_random_long_header, generate_random_short_header, rand,
+        generate_random_long_header, generate_random_short_header,
     };
+    use crate::rand::rand;
+    use crate::packet::frame::test_frame::generate_random_frame;
 
-    fn generate_random_payload() -> Vec<u8> {
-        let len = rand(19);
-        (0..len).map(|_| rand(255)).collect()
+    // testing only. this is definitely bad practice.
+    impl Header {
+        pub(crate) fn ty(&self) -> u8 {
+            match self {
+                Header::Initial(header) 
+                | Header::Retry(header)
+                | Header::VersionNegotiate(header)
+                | Header::Long(header) => {
+                    header.ty()
+                },
+                _ => unreachable!(),
+            }
+        }
+
+        pub(crate) fn rem_len(&self) -> usize {
+            match self {
+                Header::Initial(header) 
+                | Header::Retry(header)
+                | Header::VersionNegotiate(header)
+                | Header::Long(header) => {
+                    header.rem_len()
+                },
+                _ => unreachable!(),
+            }
+        }
+    }
+    
+    // testing only. this is definitely bad practice.
+    impl Frame {
+        pub(crate) fn must_be_last(&self) -> bool {
+            match self {
+                Frame::Stream { length, .. } => length.to_inner() == 0,
+                _ => false,
+            }
+        }
+    }
+
+    // long header packets CANNOT contain:
+    // 1. STREAM
+    // 2. MAX_DATA
+    // 3. MAX_STREAM_DATA
+    // 4. MAX_STREAMS
+    // 5. DATA_BLOCKED
+    // 6. STREAM_DATA_BLOCKED
+    // 7. STREAMS_BLOCKED
+    // 8. NEW_CONNECTION_ID
+    // 9. RETIRE_CONNECTION_ID
+    // 10. PATH_CHALLENGE
+    // 11. PATH_RESPONSE
+    // 12. HANDSHAKE_DONE   
+    const PROHIBITED_LONG_HEADER_FRAMES: [FrameType; 14] = [
+        FrameType::STREAM,
+        FrameType::MAX_DATA,
+        FrameType::MAX_STREAM_DATA,
+        FrameType::MAX_STREAMS_BIDI,
+        FrameType::MAX_STREAMS_UNI,
+        FrameType::DATA_BLOCKED,
+        FrameType::STREAM_DATA_BLOCKED,
+        FrameType::STREAMS_BLOCKED_BIDI,
+        FrameType::STREAMS_BLOCKED_UNI,
+        FrameType::NEW_CONNECTION_ID,
+        FrameType::RETIRE_CONNECTION_ID,
+        FrameType::PATH_CHALLENGE,
+        FrameType::PATH_RESPONSE,
+        FrameType::HANDSHAKE_DONE,
+    ];
+    // initial packets can ONLY contain:
+    // 1. CRYPTO
+    // 2. PADDING
+    // 3. CONNECTION_CLOSE_APPLICATION
+    // 4. ACK
+    // 5. ACK_ECN
+    const ALLOWED_INITIAL_FRAMES: [FrameType; 5] = [
+        FrameType::CRYPTO,
+        FrameType::PADDING,
+        FrameType::CONNECTION_CLOSE_APPLICATION,
+        FrameType::ACK,
+        FrameType::ACK_ECN
+    ];
+    fn generate_random_long_header_payload(len: usize, header: Header) -> Vec<Frame> {
+        let ty = header.ty();
+        println!("rem_len: {}", len);
+        println!("ty: {}", ty);
+        let mut curr_size: usize = 0;
+        let mut frames = Vec::new();
+        while curr_size < len {
+            let frame = generate_random_frame();
+            if PROHIBITED_LONG_HEADER_FRAMES.contains(&frame.ty()) {
+                continue;
+            }
+            if ty == LongPacketType::initial().to_inner() && !ALLOWED_INITIAL_FRAMES.contains(&frame.ty()) {
+                continue;
+            }
+            let frame_size = frame_size!(frame.clone());
+            if curr_size + frame_size > len {
+                continue;
+            }
+            frames.push(frame);
+            curr_size += frame_size;
+        }
+        if curr_size < len {
+            while curr_size < len {
+                frames.push(Frame::Padding);
+                curr_size += 1;
+            }
+        }
+        frames
+    }
+
+    // short header packets CANNOT contain:
+    // 1. CRYPTO
+    // 2. NEW_TOKEN
+    const PROHIBITED_SHORT_HEADER_FRAMES: [FrameType; 2] = [FrameType::CRYPTO, FrameType::NEW_TOKEN];
+    fn generate_random_short_header_payload(num_packets: u8) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        for _ in 0..num_packets {
+            let frame = generate_random_frame();
+            if PROHIBITED_SHORT_HEADER_FRAMES.contains(&frame.ty()) {
+                continue;
+            }
+            if frame.must_be_last() {
+                break;
+            }
+            frames.push(frame);
+        }
+        frames
     }
 
     #[test]
@@ -156,7 +293,11 @@ mod test {
             vec![1, 0, 1, 0, 1, 0, 1, 0],
             VarInt::new_u32(12),
             PacketNumber(VarInt::new_u32(8)),
-            vec![0, 1, 0, 1, 0, 1, 0, 1],
+            vec![Frame::Crypto {
+                offset: VarInt::new_u32(2),
+                crypto_length: VarInt::new_u32(10),
+                crypto_data: vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+            }],
         );
 
         let mut initial_packet_bytes = original_initial_packet.encode().unwrap();
@@ -165,13 +306,13 @@ mod test {
 
         assert_eq!(original_initial_packet, reconstructed_initial_packet);
 
-        let num_packets = 100;
+        let num_packets = 10;
         for i in 0..num_packets {
             println!("Testing random long packet {}", i);
             let header = generate_random_long_header();
             let packet = Packet {
-                header,
-                payload: generate_random_payload(),
+                header: header.clone(),
+                payload: generate_random_long_header_payload(header.rem_len(), header),
             };
             let mut packet_bytes = packet.encode().unwrap();
             let reconstructed_packet = Packet::decode(&mut packet_bytes).unwrap();
@@ -188,7 +329,7 @@ mod test {
             TwoBits::from_num(3),
             ConnectionId::new(8, vec![0; 8]),
             vec![0, 1, 0, 1],
-            vec![0; 8],
+            vec![Frame::Ping, Frame::Padding, Frame::Padding, Frame::Padding],
         );
 
         let mut short_packet_bytes = original_short_packet.encode().unwrap();
@@ -197,13 +338,13 @@ mod test {
 
         assert_eq!(original_short_packet, reconstructed_short_packet);
 
-        let num_packets = 100;
+        let num_packets = 10_000;
         for i in 0..num_packets {
             println!("Testing random short packet {}", i);
             let header = generate_random_short_header();
             let packet = Packet {
                 header,
-                payload: generate_random_payload(),
+                payload: generate_random_short_header_payload(rand(14) + 1),
             };
             let mut packet_bytes = packet.encode().unwrap();
             let reconstructed_packet = Packet::decode(&mut packet_bytes).unwrap();

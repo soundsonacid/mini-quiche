@@ -1,7 +1,7 @@
 use crate::result::{QuicheError, QuicheResult};
 
 // heavily inspired by quinn
-#[derive(Default, Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct VarInt(pub(crate) u64);
 
 impl VarInt {
@@ -10,6 +10,11 @@ impl VarInt {
     #[inline(always)]
     pub const fn new_u32(value: u32) -> Self {
         Self(value as u64)
+    }
+
+    #[inline(always)]
+    pub const fn zero() -> Self {
+        Self(0)
     }
 
     pub fn new_u64(value: u64) -> QuicheResult<Self> {
@@ -27,6 +32,16 @@ impl VarInt {
     #[inline(always)]
     pub const fn to_inner(self) -> u64 {
         self.0
+    }
+
+    // this is horrible and i know it is, but it seems to be fine
+    #[inline(always)]
+    pub fn usize(self) -> usize {
+        let value = self.to_inner();
+        if value > usize::MAX as u64 {
+            panic!("Value {} is too large to fit into a usize", value);
+        }
+        value as usize
     }
 
     pub fn size(self) -> usize {
@@ -63,6 +78,9 @@ impl VarInt {
     }
 
     pub fn decode(bytes: &mut Vec<u8>) -> QuicheResult<Self> {
+        if bytes.is_empty() {
+            return Ok(Self::new_u32(0))
+        }
         let first_byte = bytes.remove(0);
         let disc = (first_byte & 0b11_000000) >> 6;
         let mut val = (first_byte & 0b00_111111) as u64;
@@ -76,9 +94,24 @@ impl VarInt {
     }
 }
 
+impl Default for VarInt {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub fn rand_u64(modulus: u128) -> u64 {
+        (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            % modulus) as u64
+    }
 
     #[test]
     fn test_varint() {
@@ -121,5 +154,15 @@ mod test {
         );
         let large_decoded = VarInt::decode(&mut large_encoded.clone()).unwrap();
         assert_eq!(varint_large, large_decoded);
+    }
+
+    #[test]
+    fn test_cast() {
+        let num_casts = 1_000_000;
+        for _ in 0..num_casts {
+            let varint = VarInt::new_u64(rand_u64(u64::MAX as u128 + 1)).unwrap();
+            let casted: usize = varint.usize();
+            assert_eq!(varint.to_inner(), casted as u64);
+        }
     }
 }
